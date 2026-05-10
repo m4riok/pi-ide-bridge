@@ -1,13 +1,13 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import * as http from 'node:http';
 
 const BRIDGE_HOST = '127.0.0.1';
-const CONNECTION_DIR = join(tmpdir(), 'pi-ide-bridge', 'ide');
 const STARTUP_STATUS_DURATION_MS = 20_000;
 const TOGGLE_STATUS_DURATION_MS = 5_000;
+const VSCODE_EXTENSION_ID = 'm4riok.pi-ide-bridge-vscode';
 type ApprovalMode = 'ask' | 'auto';
 type ApprovalDecision = 'approved' | 'approved_auto' | 'rejected';
 
@@ -19,6 +19,7 @@ type RejectedChange = {
 };
 
 let statusHideTimer: ReturnType<typeof setTimeout> | undefined;
+let statusHideGeneration = 0;
 
 export default function (pi: ExtensionAPI) {
   let mode: ApprovalMode = 'ask';
@@ -41,6 +42,14 @@ export default function (pi: ExtensionAPI) {
       };
       break;
     }
+  });
+
+  pi.on('session_shutdown', async () => {
+    if (statusHideTimer) {
+      clearTimeout(statusHideTimer);
+      statusHideTimer = undefined;
+    }
+    statusHideGeneration++;
   });
 
   pi.on('before_agent_start', async (_event, ctx) => {
@@ -66,11 +75,42 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  pi.registerShortcut('shift+~', {
+  pi.registerShortcut('f8', {
     description: 'Toggle edit approval mode',
     handler: async (ctx) => {
       mode = mode === 'auto' ? 'ask' : 'auto';
       applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
+    },
+  });
+
+  pi.registerCommand('ide', {
+    description: 'Show IDE bridge status or install the VS Code extension',
+    handler: async (args, ctx) => {
+      const action = String(args || '').trim().toLowerCase();
+
+      if (!action || action === 'status') {
+        const status = await getIdeConnectionStatus();
+        ctx.ui.notify(status.text, status.type);
+        return;
+      }
+
+      if (action === 'install') {
+        const installed = await installVsCodeCompanion();
+        if (installed) {
+          ctx.ui.notify('✓ VS Code companion extension installed. Run /ide status to verify connection.', 'info');
+          return;
+        }
+
+        ctx.ui.notify("✕ No installer is available for IDE. Please install the 'Pi IDE Bridge' extension manually from the marketplace.", 'error');
+        return;
+      }
+
+      if (action === 'help') {
+        ctx.ui.notify('Usage: /ide | /ide status | /ide install', 'info');
+        return;
+      }
+
+      ctx.ui.notify('Usage: /ide | /ide status | /ide install', 'info');
     },
   });
 
@@ -148,19 +188,28 @@ function normalizeVscodeDecision(decision: string): ApprovalDecision {
 
 function applyApprovalStatus(ctx: any, mode: ApprovalMode, durationMs: number) {
   const theme = ctx.ui?.theme;
-  const base = `⏵⏵ auto-accept edits: ${mode === 'auto' ? 'on' : 'off'} (shift+~ to cycle)`;
+  const base = `⏵⏵ auto-accept edits: ${mode === 'auto' ? 'on' : 'off'} (F8 to cycle)`;
   const text = mode === 'auto'
     ? (theme ? theme.fg('accent', base) : base)
     : (theme ? theme.fg('error', base) : base);
 
-  ctx.ui.setStatus('pi-ide-bridge-approval', text);
-  ctx.ui.setWidget('pi-ide-bridge-approval', [text], { placement: 'belowEditor' });
+  safeSetApprovalStatus(ctx, text);
 
   if (statusHideTimer) clearTimeout(statusHideTimer);
+  const generation = ++statusHideGeneration;
   statusHideTimer = setTimeout(() => {
-    ctx.ui.setStatus('pi-ide-bridge-approval', undefined);
-    ctx.ui.setWidget('pi-ide-bridge-approval', undefined);
+    if (generation !== statusHideGeneration) return;
+    safeSetApprovalStatus(ctx, undefined);
   }, durationMs);
+}
+
+function safeSetApprovalStatus(ctx: any, text: string | undefined) {
+  try {
+    ctx.ui.setStatus('pi-ide-bridge-approval', text);
+    ctx.ui.setWidget('pi-ide-bridge-approval', text ? [text] : undefined, { placement: 'belowEditor' });
+  } catch {
+    // Ignore stale-context access after session replacement/reload.
+  }
 }
 
 function applyEditPreview(original: string, edits: Array<{ oldText: string; newText: string }>): string {
@@ -190,7 +239,7 @@ async function sendOpenDiff(payload: {
   afterText: string;
   requestId: string;
 }): Promise<string> {
-  const connection = await readLatestConnectionInfo();
+  const connection = await resolveBridgeConnectionInfo();
   if (!connection) return waitForPiPromptOnly('no active VS Code bridge connection');
 
   return postBridgeMessage(connection, '/openDiff', payload)
@@ -204,34 +253,24 @@ function waitForPiPromptOnly(reason: string): Promise<string> {
 }
 
 async function sendCloseDiff(requestId: string, decision: ApprovalDecision | 'closed_by_pi'): Promise<void> {
-  const connection = await readLatestConnectionInfo();
+  const connection = await resolveBridgeConnectionInfo();
   if (!connection) return;
   return postBridgeMessage(connection, '/closeDiff', { requestId, decision }).then(() => undefined).catch(() => undefined);
 }
 
-async function readLatestConnectionInfo(): Promise<{ port: number; authToken: string } | undefined> {
-  try {
-    const names = await readdir(CONNECTION_DIR);
-    const candidates = await Promise.all(
-      names
-        .filter((name) => /^pi-ide-bridge-server-\d+-\d+\.json$/.test(name))
-        .map(async (name) => {
-          const fullPath = join(CONNECTION_DIR, name);
-          return { fullPath, mtimeMs: (await stat(fullPath)).mtimeMs };
-        }),
-    );
+function readConnectionFromEnv(): { port: number; authToken: string } | undefined {
+  const rawPort = process.env['PI_IDE_BRIDGE_SERVER_PORT'];
+  const authToken = process.env['PI_IDE_BRIDGE_AUTH_TOKEN'];
+  const port = rawPort ? Number(rawPort) : NaN;
 
-    const files = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    for (const file of files) {
-      const parsed = JSON.parse(await readFile(file.fullPath, 'utf8')) as { port?: unknown; authToken?: unknown };
-      if (typeof parsed.port === 'number' && typeof parsed.authToken === 'string') {
-        return { port: parsed.port, authToken: parsed.authToken };
-      }
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return undefined;
+  if (!authToken) return undefined;
+
+  return { port, authToken };
+}
+
+async function resolveBridgeConnectionInfo(): Promise<{ port: number; authToken: string } | undefined> {
+  return readConnectionFromEnv();
 }
 
 function postBridgeMessage(
@@ -271,5 +310,69 @@ function postBridgeMessage(
     req.on('error', rejectPromise);
     req.write(body);
     req.end();
+  });
+}
+
+async function getIdeConnectionStatus(): Promise<{ type: 'info'; text: string }> {
+  const connection = await resolveBridgeConnectionInfo();
+  if (!connection) {
+    return {
+      type: 'info',
+      text: "🔴 Disconnected: Failed to connect to Pi IDE Bridge extension in VS Code. Please ensure the extension is running. To install the extension, run /ide install.",
+    };
+  }
+
+  const healthy = await pingBridgeHealth(connection);
+  if (!healthy) {
+    return {
+      type: 'info',
+      text: "🔴 Disconnected: Failed to connect to Pi IDE Bridge extension in VS Code. Please ensure the extension is running. To install the extension, run /ide install.",
+    };
+  }
+
+  return { type: 'info', text: '🟢 Connected to VS Code' };
+}
+
+async function pingBridgeHealth(connection: { port: number; authToken: string }): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const req = http.request(
+      {
+        host: BRIDGE_HOST,
+        port: connection.port,
+        path: '/health',
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${connection.authToken}`,
+        },
+      },
+      (res) => {
+        resolvePromise((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300);
+      },
+    );
+
+    req.on('error', () => resolvePromise(false));
+    req.end();
+  });
+}
+
+async function installVsCodeCompanion(): Promise<boolean> {
+  const commands = [
+    ['code', ['--install-extension', VSCODE_EXTENSION_ID, '--force']] as const,
+    ['code.cmd', ['--install-extension', VSCODE_EXTENSION_ID, '--force']] as const,
+  ];
+
+  for (const [command, args] of commands) {
+    const success = await runInstallerCommand(command, [...args]);
+    if (success) return true;
+  }
+
+  return false;
+}
+
+async function runInstallerCommand(command: string, args: string[]): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, args, { stdio: 'ignore', shell: process.platform === 'win32' });
+    child.on('error', () => resolvePromise(false));
+    child.on('close', (code) => resolvePromise(code === 0));
   });
 }

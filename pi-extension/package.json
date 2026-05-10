@@ -2,6 +2,10 @@
   "name": "pi-ide-bridge-extension",
   "version": "0.1.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m4riok/pi-ide-bridge"
+  },
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit"
