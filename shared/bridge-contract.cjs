@@ -7,6 +7,7 @@ const BRIDGE_OPEN_DIFF_PATH = '/openDiff';
 const BRIDGE_CLOSE_DIFF_PATH = '/closeDiff';
 const BRIDGE_HEALTH_PATH = '/health';
 const BRIDGE_CONTEXT_STREAM_PATH = '/context/stream';
+const BRIDGE_DIAGNOSTICS_PATH = '/diagnostics';
 const BRIDGE_BOOTSTRAP_INFO_PATH = '/bridgeInfo';
 
 module.exports = {
@@ -19,5 +20,6 @@ module.exports = {
   BRIDGE_CLOSE_DIFF_PATH,
   BRIDGE_HEALTH_PATH,
   BRIDGE_CONTEXT_STREAM_PATH,
+  BRIDGE_DIAGNOSTICS_PATH,
   BRIDGE_BOOTSTRAP_INFO_PATH,
 };

@@ -1,14 +1,15 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { Type } from 'typebox';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
-import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendOpenDiff } from './ideBridgeClient.js';
+import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendGetDiagnostics, sendOpenDiff } from './ideBridgeClient.js';
 import { installVsCodeCompanion } from './installer.js';
 import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer } from './status.js';
 import type { ApprovalDecision, ApprovalMode, EditorContext, RejectedChange } from './types.js';
 
-const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug';
+const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug | /ide diagnostics [active|all|file <absolutePath>]';
 const IDE_CONNECTION_POLL_MS = 7_000;
 const IDE_CONNECTION_STATUS_DURATION_MS = 3_000;
 const IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS = 200;
@@ -172,7 +173,9 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
   pi.registerCommand('ide', {
     description: 'Show IDE bridge status or install the VS Code extension',
     handler: async (args, ctx) => {
-      const action = String(args || '').trim().toLowerCase();
+      const rawArgs = String(args || '').trim();
+      const parts = rawArgs ? rawArgs.split(/\s+/) : [];
+      const action = (parts[0] || '').toLowerCase();
 
       if (!action || action === 'status') {
         const status = await getIdeConnectionStatus();
@@ -207,6 +210,34 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
         return;
       }
 
+      if (action === 'diagnostics') {
+        const rest = parts.slice(1);
+        const requestedScope = (rest[0] || 'active').toLowerCase();
+        const scope = requestedScope === 'all' || requestedScope === 'file' ? requestedScope : 'active';
+        const filePath = scope === 'file' ? rest.slice(1).join(' ').trim() : undefined;
+
+        if (scope === 'file' && !filePath) {
+          ctx.ui.notify("Usage: /ide diagnostics file <absolutePath>", 'error');
+          return;
+        }
+
+        const diagnostics = await sendGetDiagnostics({ scope, filePath });
+        if (!diagnostics) {
+          ctx.ui.notify('Pi IDE Bridge diagnostics: unavailable (bridge disconnected).', 'error');
+          return;
+        }
+
+        const payload = JSON.stringify(diagnostics, null, 2);
+        pi.sendMessage({
+          customType: 'pi-ide-bridge-diagnostics-debug',
+          display: true,
+          content: ['[IDE Diagnostics]', payload].join('\n'),
+          details: diagnostics,
+        });
+        ctx.ui.notify(`Pi IDE Bridge diagnostics dumped to chat (files=${diagnostics.files.length}, errors=${diagnostics.totalErrors}, warnings=${diagnostics.totalWarnings}).`, 'info');
+        return;
+      }
+
       if (action === 'install') {
         const installed = await installVsCodeCompanion();
         if (installed) {
@@ -224,6 +255,52 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(IDE_USAGE, 'info');
+    },
+  });
+
+  pi.registerTool({
+    name: 'get_ide_diagnostics',
+    label: 'Get IDE Diagnostics',
+    description: 'Retrieve current VS Code diagnostics (errors and warnings only) for active, open-files, or specific file scope.',
+    promptSnippet: 'Query VS Code diagnostics; prefer active scope when the request is vague.',
+    promptGuidelines: [
+      'Use get_ide_diagnostics when current IDE errors/warnings can help resolve the user task.',
+      "When the user asks vaguely (e.g., 'check diagnostics' without scope), prefer scope='active' first.",
+      "Use scope='active' for current editor (preferred default), scope='all' for open files (up to 10), or scope='file' with absolute filePath.",
+      "scope='active' and scope='file' can return up to 500 diagnostics for deeper detail; scope='all' returns up to 50 per file.",
+      'Only errors and warnings are returned; hints and info are intentionally excluded.',
+    ],
+    parameters: Type.Object({
+      scope: Type.Optional(Type.Union([
+        Type.Literal('active'),
+        Type.Literal('all'),
+        Type.Literal('file'),
+      ], { description: "Diagnostics scope. Defaults to 'active'." })),
+      filePath: Type.Optional(Type.String({ description: "Absolute file path. Required when scope is 'file'." })),
+    }),
+    async execute(_toolCallId, params) {
+      const scope = params.scope ?? 'active';
+      const filePath = typeof params.filePath === 'string' ? params.filePath : undefined;
+
+      if (scope === 'file' && !filePath) {
+        return {
+          content: [{ type: 'text', text: "get_ide_diagnostics error: filePath is required when scope is 'file'." }],
+          details: {},
+        };
+      }
+
+      const diagnostics = await sendGetDiagnostics({ scope, filePath });
+      if (!diagnostics) {
+        return {
+          content: [{ type: 'text', text: 'get_ide_diagnostics error: IDE bridge not connected.' }],
+          details: {},
+        };
+      }
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }],
+        details: {},
+      };
     },
   });
 

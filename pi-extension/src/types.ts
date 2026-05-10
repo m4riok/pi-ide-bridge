@@ -26,3 +26,30 @@ export type EditorContext = {
   openFiles: OpenFile[];
   isTrusted: boolean;
 };
+
+export type DiagnosticsScope = 'active' | 'all' | 'file';
+
+export type DiagnosticsRequest = {
+  scope?: DiagnosticsScope;
+  filePath?: string;
+};
+
+export type DiagnosticEntry = {
+  severity: 'error' | 'warning';
+  message: string;
+  line: number;
+  character: number;
+  source?: string;
+  code?: string;
+};
+
+export type FileDiagnostics = {
+  path: string;
+  diagnostics: DiagnosticEntry[];
+};
+
+export type DiagnosticsResponse = {
+  files: FileDiagnostics[];
+  totalErrors: number;
+  totalWarnings: number;
+};

@@ -7,6 +7,7 @@ export const BRIDGE_OPEN_DIFF_PATH: string;
 export const BRIDGE_CLOSE_DIFF_PATH: string;
 export const BRIDGE_HEALTH_PATH: string;
 export const BRIDGE_CONTEXT_STREAM_PATH: string;
+export const BRIDGE_DIAGNOSTICS_PATH: string;
 export const BRIDGE_BOOTSTRAP_INFO_PATH: string;
 
 declare const contract: {
@@ -19,6 +20,7 @@ declare const contract: {
   BRIDGE_CLOSE_DIFF_PATH: string;
   BRIDGE_HEALTH_PATH: string;
   BRIDGE_CONTEXT_STREAM_PATH: string;
+  BRIDGE_DIAGNOSTICS_PATH: string;
   BRIDGE_BOOTSTRAP_INFO_PATH: string;
 };
 

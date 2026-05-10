@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 import { BOOTSTRAP_PORT, BRIDGE_HOST } from './constants.js';
-import type { BridgeCloseDecision, BridgeConnection, EditorContext } from './types.js';
+import type { BridgeCloseDecision, BridgeConnection, DiagnosticsRequest, DiagnosticsResponse, EditorContext } from './types.js';
 import bridgeContract from '../../shared/bridge-contract.cjs';
 
 const {
@@ -11,6 +11,7 @@ const {
   BRIDGE_CLOSE_DIFF_PATH,
   BRIDGE_HEALTH_PATH,
   BRIDGE_CONTEXT_STREAM_PATH,
+  BRIDGE_DIAGNOSTICS_PATH,
   BRIDGE_BOOTSTRAP_INFO_PATH,
 } = bridgeContract;
 
@@ -42,6 +43,20 @@ export async function sendCloseDiff(requestId: string, decision: BridgeCloseDeci
   const connection = await resolveBridgeConnectionInfo();
   if (!connection) return;
   return postBridgeMessage(connection, BRIDGE_CLOSE_DIFF_PATH, { requestId, decision }).then(() => undefined).catch(() => undefined);
+}
+
+export async function sendGetDiagnostics(params: DiagnosticsRequest): Promise<DiagnosticsResponse | undefined> {
+  const connection = await resolveBridgeConnectionInfo();
+  if (!connection) return undefined;
+
+  try {
+    const response = await postBridgeMessage(connection, BRIDGE_DIAGNOSTICS_PATH, params as Record<string, unknown>);
+    if (response?.ok === false) return undefined;
+    if (!Array.isArray(response?.files)) return undefined;
+    return response as unknown as DiagnosticsResponse;
+  } catch {
+    return undefined;
+  }
 }
 
 export function connectContextStream(

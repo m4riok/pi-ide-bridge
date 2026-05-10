@@ -55,7 +55,9 @@ function createEditorContextService(vscode) {
 
   function pathFromTab(tab) {
     const input = tab?.input;
-    return input?.uri?.fsPath || input?.modified?.fsPath;
+    const uri = input?.uri || input?.modified;
+    if (!uri || uri.scheme !== 'file') return undefined;
+    return uri.fsPath;
   }
 
   function getOpenFilePaths() {
