@@ -13,3 +13,4 @@ dist/
 # Local runtime/editor state
 pi-extension/.vsdiff-state.json
 .claude/settings.local.json
+.vscode/
