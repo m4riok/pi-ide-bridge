@@ -1,4 +1,5 @@
-import type { ApprovalMode } from './types.js';
+import { basename } from 'node:path';
+import type { ApprovalMode, EditorContext } from './types.js';
 
 let statusHideTimer: ReturnType<typeof setTimeout> | undefined;
 let statusHideGeneration = 0;
@@ -61,6 +62,46 @@ function safeSetConnectionStatus(ctx: any, text: string | undefined) {
     ctx.ui.setWidget('pi-ide-bridge-connection', text ? [text] : undefined, { placement: 'belowEditor' });
   } catch (error) {
     console.warn(`Pi IDE Bridge: failed to set connection status UI: ${String((error as Error)?.message || error)}`);
+  }
+}
+
+export function applyIdeContextStatus(ctx: any, context: EditorContext | undefined) {
+  try {
+    if (!context || !Array.isArray(context.openFiles) || context.openFiles.length === 0) {
+      safeSetContextStatus(ctx, undefined);
+      return;
+    }
+
+    const active = context.openFiles.find((file) => file.isActive) || context.openFiles[0];
+    if (!active) {
+      safeSetContextStatus(ctx, undefined);
+      return;
+    }
+
+    const selectedText = active.selectedText || '';
+    const selectedLines = selectedText ? selectedText.split(/\r?\n/).length : 0;
+    const base = selectedLines > 0
+      ? `✂  ${selectedLines} line${selectedLines === 1 ? '' : 's'} selected`
+      : `◉  In ${basename(active.path)}`;
+    const text = formatDeepBluePurple(ctx, base);
+    safeSetContextStatus(ctx, text);
+  } catch (error) {
+    console.warn(`Pi IDE Bridge: failed to set IDE context status UI: ${String((error as Error)?.message || error)}`);
+  }
+}
+
+function formatDeepBluePurple(ctx: any, text: string): string {
+  const theme = ctx.ui?.theme;
+  if (theme?.fg) return theme.fg('accent', text);
+  return `\u001b[38;2;74;61;196m${text}\u001b[0m`;
+}
+
+function safeSetContextStatus(ctx: any, text: string | undefined) {
+  try {
+    ctx.ui.setStatus('pi-ide-bridge-context', text);
+    ctx.ui.setWidget('pi-ide-bridge-context', text ? [text] : undefined, { placement: 'belowEditor' });
+  } catch (error) {
+    console.warn(`Pi IDE Bridge: failed to set context status UI: ${String((error as Error)?.message || error)}`);
   }
 }
 

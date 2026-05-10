@@ -3,20 +3,25 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
-import { getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendOpenDiff } from './ideBridgeClient.js';
+import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendOpenDiff } from './ideBridgeClient.js';
 import { installVsCodeCompanion } from './installer.js';
-import { applyApprovalStatus, applyConnectionStatus, clearApprovalStatusTimer, clearConnectionStatusTimer } from './status.js';
-import type { ApprovalDecision, ApprovalMode, RejectedChange } from './types.js';
+import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer } from './status.js';
+import type { ApprovalDecision, ApprovalMode, EditorContext, RejectedChange } from './types.js';
 
-const IDE_USAGE = 'Usage: /ide | /ide status | /ide install | /ide debug';
+const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug';
 const IDE_CONNECTION_POLL_MS = 7_000;
 const IDE_CONNECTION_STATUS_DURATION_MS = 3_000;
+const IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS = 200;
 
 export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
   let mode: ApprovalMode = 'ask';
   let pendingRejectedChange: RejectedChange | undefined;
   let ideConnectionPollTimer: ReturnType<typeof setInterval> | undefined;
   let lastIdeConnected: boolean | undefined;
+  let liveContext: EditorContext | undefined;
+  let contextStreamHandle: { disconnect: () => void } | undefined;
+  let contextReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let contextReconnectAttempt = 0;
 
   pi.on('session_start', async (_event, ctx) => {
     applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
@@ -35,6 +40,36 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       pollIdeConnection().catch(() => {});
     }, IDE_CONNECTION_POLL_MS);
 
+    const reconnectDelays = [150, 300, 600, 1_000, 5_000];
+    const clearReconnectTimer = () => {
+      if (contextReconnectTimer) {
+        clearTimeout(contextReconnectTimer);
+        contextReconnectTimer = undefined;
+      }
+    };
+
+    const startContextStream = () => {
+      contextStreamHandle = connectContextStream(
+        (context) => {
+          liveContext = context;
+          contextReconnectAttempt = 0;
+          clearReconnectTimer();
+          applyIdeContextStatus(ctx, context);
+        },
+        () => {
+          if (contextReconnectTimer) return;
+          const delay = reconnectDelays[Math.min(contextReconnectAttempt, reconnectDelays.length - 1)];
+          contextReconnectAttempt++;
+          contextReconnectTimer = setTimeout(() => {
+            contextReconnectTimer = undefined;
+            startContextStream();
+          }, delay);
+        },
+      );
+    };
+
+    startContextStream();
+
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
@@ -51,35 +86,77 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.on('session_shutdown', async () => {
+  pi.on('session_shutdown', async (_event, ctx) => {
     clearApprovalStatusTimer();
     clearConnectionStatusTimer();
     if (ideConnectionPollTimer) {
       clearInterval(ideConnectionPollTimer);
       ideConnectionPollTimer = undefined;
     }
+    if (contextReconnectTimer) {
+      clearTimeout(contextReconnectTimer);
+      contextReconnectTimer = undefined;
+    }
+    contextStreamHandle?.disconnect();
+    contextStreamHandle = undefined;
+    contextReconnectAttempt = 0;
+    liveContext = undefined;
+    applyIdeContextStatus(ctx, undefined);
     lastIdeConnected = undefined;
   });
 
   pi.on('before_agent_start', async (_event, _ctx) => {
-    if (!pendingRejectedChange) return;
-    const rejected = pendingRejectedChange;
-    pendingRejectedChange = undefined;
+    if (pendingRejectedChange) {
+      const rejected = pendingRejectedChange;
+      pendingRejectedChange = undefined;
+
+      return {
+        message: {
+          customType: 'pi-ide-bridge-rejected-change',
+          display: false,
+          content: [
+            'User rejected a proposed edit in the previous step.',
+            'If relevant to the new user prompt, revise that same proposal instead of starting over.',
+            `File: ${rejected.filePath}`,
+            '--- BEFORE ---',
+            rejected.beforeText,
+            '--- AFTER (REJECTED) ---',
+            rejected.afterText,
+          ].join('\n'),
+          details: rejected,
+        },
+      };
+    }
+
+    if (!liveContext || !Array.isArray(liveContext.openFiles) || liveContext.openFiles.length === 0) return;
+
+    const active = liveContext.openFiles.find((file) => file.isActive) || liveContext.openFiles[0];
+    if (!active) return;
+
+    const cursor = active.cursor ? `line ${active.cursor.line}, col ${active.cursor.character}` : 'cursor unknown';
+    const selectedText = active.selectedText || '';
+    const selectedLines = selectedText ? selectedText.split(/\r?\n/).length : 0;
+    const selectedPreview = selectedText.length > IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS
+      ? `${selectedText.slice(0, IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS)}…`
+      : selectedText;
+    const selectedInfo = selectedText
+      ? `"${selectedPreview}" (${selectedLines} line${selectedLines === 1 ? '' : 's'})`
+      : '(none)';
+    const openFileNames = liveContext.openFiles.map((file) => file.path.split('/').pop() || file.path);
+    const preview = openFileNames.slice(0, 2).join(', ');
+    const remaining = openFileNames.length - 2;
 
     return {
       message: {
-        customType: 'pi-ide-bridge-rejected-change',
+        customType: 'pi-ide-bridge-editor-context',
         display: false,
         content: [
-          'User rejected a proposed edit in the previous step.',
-          'If relevant to the new user prompt, revise that same proposal instead of starting over.',
-          `File: ${rejected.filePath}`,
-          '--- BEFORE ---',
-          rejected.beforeText,
-          '--- AFTER (REJECTED) ---',
-          rejected.afterText,
+          '[IDE Context]',
+          `Active file: ${active.path} — ${cursor}`,
+          `Selected: ${selectedInfo}`,
+          `Open files: ${preview}${remaining > 0 ? `, +${remaining} more` : ''}`,
         ].join('\n'),
-        details: rejected,
+        details: liveContext,
       },
     };
   });
@@ -110,6 +187,23 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
           return;
         }
         ctx.ui.notify(`Pi IDE Bridge debug: connected=no source=${debug.source} reason=${String(debug.reason || 'unknown')}`, 'info');
+        return;
+      }
+
+      if (action === 'context') {
+        if (!liveContext) {
+          ctx.ui.notify('Pi IDE Bridge context: unavailable (no SSE context received yet).', 'info');
+          return;
+        }
+
+        const payload = JSON.stringify(liveContext, null, 2);
+        pi.sendMessage({
+          customType: 'pi-ide-bridge-context-debug',
+          display: true,
+          content: ['[IDE Context Debug]', payload].join('\n'),
+          details: liveContext,
+        });
+        ctx.ui.notify('Pi IDE Bridge context dumped to chat.', 'info');
         return;
       }
 

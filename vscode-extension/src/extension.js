@@ -11,6 +11,7 @@ const { registerDiffTracking } = require('./diff/tabTracking');
 const { createBridgeServer } = require('./bridge/server');
 const { createBootstrapServer } = require('./bridge/bootstrapServer');
 const { writeConnectionFile, publishEnv, clearEnv, removeConnectionFile } = require('./bridge/connection');
+const { createEditorContextService } = require('./context/editorContextService');
 
 function activate(context) {
   const afterContentProvider = createAfterContentProvider(vscode, AFTER_SCHEME);
@@ -25,8 +26,9 @@ function activate(context) {
   const providerDisposable = afterContentProvider.register();
   const commandDisposables = registerDiffCommands(vscode, diffManager);
   const trackingDisposables = registerDiffTracking(vscode, diffManager);
+  const editorContextService = createEditorContextService(vscode);
 
-  const bridge = createBridgeServer({ vscode, diffManager });
+  const bridge = createBridgeServer({ vscode, diffManager, editorContextService });
   const bootstrap = createBootstrapServer(vscode);
   const bootstrapTokenStateKey = 'piIdeBridge.bootstrapAuthToken';
   const bootstrapAuthToken = String(context.globalState.get(bootstrapTokenStateKey) || randomUUID());
@@ -60,11 +62,33 @@ function activate(context) {
     vscode.window.showInformationMessage(`Pi IDE Bridge debug: bootstrap=${b.host}:${b.bootstrapPort} ready=${b.ready ? 'yes' : 'no'} bridgePort=${b.bridgePort ?? 'n/a'}`);
   });
 
+  const activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    editorContextService.markFocused(editor);
+    editorContextService.notify();
+  });
+  const selectionDisposable = vscode.window.onDidChangeTextEditorSelection((event) => {
+    editorContextService.recordSelection(event?.textEditor);
+    editorContextService.notify();
+  });
+  const openDocumentDisposable = vscode.workspace.onDidOpenTextDocument(() => {
+    editorContextService.notify();
+  });
+  const closeDocumentDisposable = vscode.workspace.onDidCloseTextDocument((document) => {
+    editorContextService.removePath(document?.uri?.fsPath);
+    editorContextService.notify();
+  });
+
+  editorContextService.markFocused(vscode.window.activeTextEditor);
+
   context.subscriptions.push(
     providerDisposable,
     ...commandDisposables,
     ...trackingDisposables,
     debugDisposable,
+    activeEditorDisposable,
+    selectionDisposable,
+    openDocumentDisposable,
+    closeDocumentDisposable,
     {
       dispose: () => {
         bridge.stop();

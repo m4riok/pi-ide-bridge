@@ -6,6 +6,7 @@ export const BRIDGE_BOOTSTRAP_AUTH_ENV_KEY: string;
 export const BRIDGE_OPEN_DIFF_PATH: string;
 export const BRIDGE_CLOSE_DIFF_PATH: string;
 export const BRIDGE_HEALTH_PATH: string;
+export const BRIDGE_CONTEXT_STREAM_PATH: string;
 export const BRIDGE_BOOTSTRAP_INFO_PATH: string;
 
 declare const contract: {
@@ -17,6 +18,7 @@ declare const contract: {
   BRIDGE_OPEN_DIFF_PATH: string;
   BRIDGE_CLOSE_DIFF_PATH: string;
   BRIDGE_HEALTH_PATH: string;
+  BRIDGE_CONTEXT_STREAM_PATH: string;
   BRIDGE_BOOTSTRAP_INFO_PATH: string;
 };
 

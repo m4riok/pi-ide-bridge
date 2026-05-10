@@ -2,9 +2,9 @@ const http = require('node:http');
 const { BRIDGE_HOST } = require('../common/constants');
 const { createAuthToken, isAuthorized } = require('./auth');
 const { HttpRequestError, readRequestJson, sendJson } = require('./request');
-const { BRIDGE_OPEN_DIFF_PATH, BRIDGE_CLOSE_DIFF_PATH, BRIDGE_HEALTH_PATH } = require('../../../shared/bridge-contract.cjs');
+const { BRIDGE_OPEN_DIFF_PATH, BRIDGE_CLOSE_DIFF_PATH, BRIDGE_HEALTH_PATH, BRIDGE_CONTEXT_STREAM_PATH } = require('../../../shared/bridge-contract.cjs');
 
-function createBridgeServer({ vscode, diffManager }) {
+function createBridgeServer({ vscode, diffManager, editorContextService }) {
   let bridgeServer;
   let bridgePort;
   let authToken;
@@ -62,8 +62,43 @@ function createBridgeServer({ vscode, diffManager }) {
           return;
         }
 
+        if (req.method === 'GET' && req.url === BRIDGE_CONTEXT_STREAM_PATH) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+          });
+
+          const sendSnapshot = (snapshot) => {
+            if (res.writableEnded || res.destroyed) return;
+            res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+          };
+
+          try {
+            sendSnapshot(editorContextService.snapshot());
+          } catch {
+            // best-effort initial snapshot; stream remains active for future updates
+          }
+          const unsubscribe = editorContextService.subscribe(sendSnapshot);
+          const keepalive = setInterval(() => {
+            if (!res.writableEnded && !res.destroyed) {
+              res.write(': keepalive\n\n');
+            }
+          }, 15_000);
+
+          req.on('close', () => {
+            unsubscribe();
+            clearInterval(keepalive);
+          });
+          return;
+        }
+
         sendJson(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
+        if (res.headersSent || res.writableEnded || res.destroyed) {
+          try { res.end(); } catch {}
+          return;
+        }
         const status = error instanceof HttpRequestError ? error.statusCode : 500;
         sendJson(res, status, { ok: false, error: String(error instanceof Error ? error.message : error) });
       }

@@ -13,3 +13,16 @@ export type BridgeConnection = {
   port: number;
   authToken: string;
 };
+
+export type OpenFile = {
+  path: string;
+  timestamp: number;
+  isActive?: boolean;
+  selectedText?: string;
+  cursor?: { line: number; character: number };
+};
+
+export type EditorContext = {
+  openFiles: OpenFile[];
+  isTrusted: boolean;
+};

@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 import { BOOTSTRAP_PORT, BRIDGE_HOST } from './constants.js';
-import type { BridgeCloseDecision, BridgeConnection } from './types.js';
+import type { BridgeCloseDecision, BridgeConnection, EditorContext } from './types.js';
 import bridgeContract from '../../shared/bridge-contract.cjs';
 
 const {
@@ -10,6 +10,7 @@ const {
   BRIDGE_OPEN_DIFF_PATH,
   BRIDGE_CLOSE_DIFF_PATH,
   BRIDGE_HEALTH_PATH,
+  BRIDGE_CONTEXT_STREAM_PATH,
   BRIDGE_BOOTSTRAP_INFO_PATH,
 } = bridgeContract;
 
@@ -41,6 +42,99 @@ export async function sendCloseDiff(requestId: string, decision: BridgeCloseDeci
   const connection = await resolveBridgeConnectionInfo();
   if (!connection) return;
   return postBridgeMessage(connection, BRIDGE_CLOSE_DIFF_PATH, { requestId, decision }).then(() => undefined).catch(() => undefined);
+}
+
+export function connectContextStream(
+  onContext: (context: EditorContext) => void,
+  onDisconnect: () => void,
+): { disconnect: () => void } {
+  let closed = false;
+  let disconnected = false;
+  let req: http.ClientRequest | undefined;
+
+  const notifyDisconnect = () => {
+    if (closed || disconnected) return;
+    disconnected = true;
+    onDisconnect();
+  };
+
+  const start = async () => {
+    const connection = await resolveBridgeConnectionInfo();
+    if (!connection) {
+      notifyDisconnect();
+      return;
+    }
+
+    req = http.request(
+      {
+        host: BRIDGE_HOST,
+        port: connection.port,
+        path: BRIDGE_CONTEXT_STREAM_PATH,
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${connection.authToken}`,
+          accept: 'text/event-stream',
+        },
+      },
+      (res) => {
+        if ((res.statusCode || 500) < 200 || (res.statusCode || 500) >= 300) {
+          res.resume();
+          notifyDisconnect();
+          return;
+        }
+
+        let buffer = '';
+        res.on('data', (chunk) => {
+          if (closed) return;
+          buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+          buffer = buffer.replace(/\r\n/g, '\n');
+
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary !== -1) {
+            const eventChunk = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+
+            const dataLines = eventChunk
+              .split('\n')
+              .map((line) => line.trimEnd())
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trimStart());
+
+            if (dataLines.length > 0) {
+              try {
+                onContext(JSON.parse(dataLines.join('\n')) as EditorContext);
+              } catch {
+                // ignore malformed events and continue
+              }
+            }
+
+            boundary = buffer.indexOf('\n\n');
+          }
+        });
+
+        res.on('error', () => {
+          notifyDisconnect();
+        });
+        res.on('close', () => {
+          notifyDisconnect();
+        });
+      },
+    );
+
+    req.on('error', () => {
+      notifyDisconnect();
+    });
+    req.end();
+  };
+
+  void start().catch(() => notifyDisconnect());
+
+  return {
+    disconnect: () => {
+      closed = true;
+      req?.destroy();
+    },
+  };
 }
 
 export async function getIdeConnectionStatus(): Promise<{ type: 'info'; text: string }> {
