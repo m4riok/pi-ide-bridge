@@ -6,15 +6,16 @@ Pi IDE Bridge helps you review and approve changes in VS Code before Pi applies 
 
 - Review proposed edits in a familiar VS Code diff view
 - Approve or reject changes before files are updated
-- Keep helpful editor context available while working with Pi
-- See and use:
+- Give Pi useful editor context from:
   - open files
   - active file
-  - current selection and cursor position
-  - editor diagnostics
+  - selected lines
+  - cursor position
+- Use `get_ide_diagnostics` to fetch diagnostics for:
+  - all open files
+  - a specific file
 
 ## Project parts
 
 - `pi-extension/` — the Pi side
 - `vscode-extension/` — the VS Code side
-
