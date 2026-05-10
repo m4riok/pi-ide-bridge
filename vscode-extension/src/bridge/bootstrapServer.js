@@ -1,4 +1,5 @@
 const http = require('node:http');
+const { timingSafeEqual } = require('node:crypto');
 const { BRIDGE_HOST, BOOTSTRAP_PORT } = require('../common/constants');
 const { sendJson } = require('./request');
 const { BRIDGE_BOOTSTRAP_INFO_PATH } = require('../../../shared/bridge-contract.cjs');
@@ -39,7 +40,10 @@ function createBootstrapServer(vscode) {
 
       if (req.method === 'GET' && req.url === BRIDGE_BOOTSTRAP_INFO_PATH) {
         const authHeader = String(req.headers.authorization || '');
-        if (!bootstrapAuthToken || authHeader !== `Bearer ${bootstrapAuthToken}`) {
+        const expected = Buffer.from(`Bearer ${bootstrapAuthToken || ''}`);
+        const actual = Buffer.from(authHeader);
+        const isValid = bootstrapAuthToken && actual.length === expected.length && timingSafeEqual(actual, expected);
+        if (!isValid) {
           sendJson(res, 401, { ok: false, error: 'unauthorized' });
           return;
         }

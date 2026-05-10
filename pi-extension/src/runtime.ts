@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
+import { RETRY_BACKOFF_MS, STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
 import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendGetDiagnostics, sendOpenDiff } from './ideBridgeClient.js';
 import { installVsCodeCompanion } from './installer.js';
@@ -28,7 +28,10 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
 
     const pollIdeConnection = async () => {
-      const connected = await isIdeConnected().catch(() => false);
+      const connected = await isIdeConnected().catch((e) => {
+        console.warn('connection poll error:', String((e as Error | undefined)?.message ?? e));
+        return false;
+      });
       if (lastIdeConnected === undefined || connected !== lastIdeConnected) {
         applyConnectionStatus(ctx, connected, IDE_CONNECTION_STATUS_DURATION_MS);
         lastIdeConnected = connected;
@@ -38,10 +41,12 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     await pollIdeConnection();
     if (ideConnectionPollTimer) clearInterval(ideConnectionPollTimer);
     ideConnectionPollTimer = setInterval(() => {
-      pollIdeConnection().catch(() => {});
+      pollIdeConnection().catch((e) => {
+        console.warn('connection poll error:', String((e as Error | undefined)?.message ?? e));
+      });
     }, IDE_CONNECTION_POLL_MS);
 
-    const reconnectDelays = [150, 300, 600, 1_000, 5_000];
+    const reconnectDelays = RETRY_BACKOFF_MS;
     const clearReconnectTimer = () => {
       if (contextReconnectTimer) {
         clearTimeout(contextReconnectTimer);
@@ -74,17 +79,30 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (entry.type !== 'custom' || entry.customType !== 'pi-ide-bridge-rejected-change') continue;
-      const data = (entry.data || {}) as Partial<RejectedChange>;
-      if (typeof data.filePath !== 'string') continue;
-      pendingRejectedChange = {
-        filePath: data.filePath,
-        beforeText: String(data.beforeText ?? ''),
-        afterText: String(data.afterText ?? ''),
-        rejectedAt: Number(data.rejectedAt ?? Date.now()),
-      };
-      break;
+      if (entry.type !== 'custom') continue;
+
+      if (!pendingRejectedChange && entry.customType === 'pi-ide-bridge-rejected-change') {
+        const data = (entry.data || {}) as Partial<RejectedChange>;
+        if (typeof data.filePath === 'string') {
+          pendingRejectedChange = {
+            filePath: data.filePath,
+            beforeText: String(data.beforeText ?? ''),
+            afterText: String(data.afterText ?? ''),
+            rejectedAt: Number(data.rejectedAt ?? Date.now()),
+          };
+        }
+      }
+
+      if (entry.customType === 'pi-ide-bridge-approval-mode') {
+        const data = (entry.data || {}) as { mode?: unknown };
+        if (data.mode === 'ask' || data.mode === 'auto') {
+          mode = data.mode;
+          break;
+        }
+      }
     }
+
+    applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
@@ -166,6 +184,7 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     description: 'Toggle edit approval mode',
     handler: async (ctx) => {
       mode = mode === 'auto' ? 'ask' : 'auto';
+      persistApprovalMode(pi, mode);
       applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
     },
   });
@@ -330,7 +349,12 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
         return new Promise<ApprovalDecision>(() => undefined);
       });
 
-    const piDecisionPromise = askPiDecision(ctx, pathArg, piPromptAbort.signal);
+    const piDecisionPromise = askPiDecision(ctx, pathArg, piPromptAbort.signal).catch((error) => {
+      if (isAbortError(error)) {
+        return waitForDecisionFallback();
+      }
+      throw error;
+    });
 
     const decision = await Promise.race([
       vscodeDecisionPromise.then((d) => {
@@ -342,6 +366,7 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
 
     if (decision === 'approved_auto') {
       mode = 'auto';
+      persistApprovalMode(pi, mode);
       applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
       await sendCloseDiff(event.toolCallId, 'approved');
       return;
@@ -382,4 +407,17 @@ async function askPiDecision(ctx: any, pathArg: string, signal?: AbortSignal): P
 function normalizeVscodeDecision(decision: string): ApprovalDecision {
   if (decision === 'approved') return 'approved';
   return 'rejected';
+}
+
+function persistApprovalMode(pi: ExtensionAPI, mode: ApprovalMode): void {
+  pi.appendEntry('pi-ide-bridge-approval-mode', { mode, updatedAt: Date.now() });
+}
+
+function isAbortError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | undefined)?.name;
+  return name === 'AbortError';
+}
+
+function waitForDecisionFallback(): Promise<ApprovalDecision> {
+  return new Promise(() => undefined);
 }

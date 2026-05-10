@@ -110,11 +110,10 @@ function createDiffManager({ vscode, path, afterScheme, diffVisibleContext, afte
       preserveFocus: true,
     });
 
-    if (diffByRequestId.size >= MAX_OPEN_DIFFS) {
+    while (diffByRequestId.size >= MAX_OPEN_DIFFS) {
       const oldestRequestId = diffByRequestId.keys().next().value;
-      if (oldestRequestId) {
-        await closeDiffByRequestId(oldestRequestId, { decision: 'rejected' });
-      }
+      if (!oldestRequestId) break;
+      await closeDiffByRequestId(oldestRequestId, { decision: 'rejected' });
     }
 
     diffByRequestId.set(key, {

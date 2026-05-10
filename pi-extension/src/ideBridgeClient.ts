@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import { BOOTSTRAP_PORT, BRIDGE_HOST } from './constants.js';
+import { BOOTSTRAP_PORT, BOOTSTRAP_RETRY_BACKOFF_MS, BRIDGE_HOST } from './constants.js';
 import type { BridgeCloseDecision, BridgeConnection, DiagnosticsRequest, DiagnosticsResponse, EditorContext } from './types.js';
 import bridgeContract from '../../shared/bridge-contract.cjs';
 
@@ -248,96 +248,77 @@ async function resolveBridgeConnectionInfoDetailed(): Promise<ResolveResult> {
 }
 
 async function fetchBridgeConnectionWithRetry(): Promise<{ connection?: BridgeConnection; reason?: string }> {
-  const delays = [150, 300, 600, 1000];
   let lastReason = 'Bootstrap unavailable';
-  for (let i = 0; i < delays.length; i++) {
+  for (let i = 0; i < BOOTSTRAP_RETRY_BACKOFF_MS.length; i++) {
     const found = await fetchBridgeConnectionFromBootstrap();
     if (found.connection) return found;
     if (found.reason) lastReason = found.reason;
-    await sleep(delays[i]);
+    await sleep(BOOTSTRAP_RETRY_BACKOFF_MS[i]);
   }
   return { reason: lastReason };
 }
 
 async function fetchBridgeConnectionFromBootstrap(): Promise<{ connection?: BridgeConnection; reason?: string }> {
-  return new Promise((resolvePromise) => {
-    const bootstrapAuthToken = process.env[BRIDGE_BOOTSTRAP_AUTH_ENV_KEY];
-    if (!bootstrapAuthToken) {
-      resolvePromise({ reason: 'Bootstrap auth token missing (bootstrap recovery unavailable)' });
-      return;
+  const bootstrapAuthToken = process.env[BRIDGE_BOOTSTRAP_AUTH_ENV_KEY];
+  if (!bootstrapAuthToken) {
+    return { reason: 'Bootstrap auth token missing (bootstrap recovery unavailable)' };
+  }
+
+  try {
+    const { statusCode, data } = await makeHttpRequest({
+      host: BRIDGE_HOST,
+      port: BOOTSTRAP_PORT,
+      path: BRIDGE_BOOTSTRAP_INFO_PATH,
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${bootstrapAuthToken}`,
+      },
+      timeoutMs: HTTP_TIMEOUT_MS,
+      timeoutErrorMessage: 'bootstrap timeout',
+    });
+
+    if (statusCode === 401) {
+      return { reason: 'Bootstrap authorization failed' };
+    }
+    if (!data?.ready) {
+      return { reason: 'Bootstrap is running but bridge is not ready yet' };
     }
 
-    const req = http.request(
-      {
-        host: BRIDGE_HOST,
-        port: BOOTSTRAP_PORT,
-        path: BRIDGE_BOOTSTRAP_INFO_PATH,
-        method: 'GET',
-        headers: {
-          authorization: `Bearer ${bootstrapAuthToken}`,
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        });
-        res.on('end', () => {
-          try {
-            if ((res.statusCode || 500) === 401) {
-              resolvePromise({ reason: 'Bootstrap authorization failed' });
-              return;
-            }
-            const response = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
-            const data = response ? JSON.parse(response) : {};
-            if (!data?.ready) {
-              resolvePromise({ reason: 'Bootstrap is running but bridge is not ready yet' });
-              return;
-            }
-            const port = Number(data?.port);
-            const authToken = typeof data?.authToken === 'string' ? data.authToken : '';
-            if (!Number.isInteger(port) || port <= 0 || port > 65535 || !authToken) {
-              resolvePromise({ reason: 'Bootstrap returned invalid bridge payload' });
-              return;
-            }
-            resolvePromise({ connection: { port, authToken } });
-          } catch (error) {
-            console.warn(`Pi IDE Bridge: invalid bootstrap response: ${String(error instanceof Error ? error.message : error)}`);
-            resolvePromise({ reason: 'Bootstrap returned invalid JSON' });
-          }
-        });
-        res.resume();
-      },
-    );
+    const port = Number(data?.port);
+    const authToken = typeof data?.authToken === 'string' ? data.authToken : '';
+    if (!Number.isInteger(port) || port <= 0 || port > 65535 || !authToken) {
+      return { reason: 'Bootstrap returned invalid bridge payload' };
+    }
 
-    req.setTimeout(HTTP_TIMEOUT_MS, () => req.destroy(new Error('bootstrap timeout')));
-    req.on('error', (error) => resolvePromise({ reason: String(error instanceof Error ? error.message : error) }));
-    req.end();
-  });
+    return { connection: { port, authToken } };
+  } catch (error) {
+    console.warn(`Pi IDE Bridge: invalid bootstrap response: ${String(error instanceof Error ? error.message : error)}`);
+    return { reason: 'Bootstrap returned invalid JSON' };
+  }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
-function postBridgeMessage(
-  connection: BridgeConnection,
-  pathName: string,
-  message: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+function makeHttpRequest(options: {
+  host: string;
+  port: number;
+  path: string;
+  method: string;
+  headers?: Record<string, string | number>;
+  body?: string;
+  timeoutMs?: number;
+  timeoutErrorMessage?: string;
+}): Promise<{ statusCode: number; data: Record<string, unknown> }> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const body = JSON.stringify(message);
     const req = http.request(
       {
-        host: BRIDGE_HOST,
-        port: connection.port,
-        path: pathName,
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${connection.authToken}`,
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(body),
-        },
+        host: options.host,
+        port: options.port,
+        path: options.path,
+        method: options.method,
+        headers: options.headers,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -347,7 +328,8 @@ function postBridgeMessage(
         res.on('end', () => {
           try {
             const response = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
-            resolvePromise(response ? JSON.parse(response) : {});
+            const data = response ? JSON.parse(response) : {};
+            resolvePromise({ statusCode: res.statusCode || 500, data });
           } catch (error) {
             rejectPromise(new Error(`invalid JSON response from bridge: ${String(error instanceof Error ? error.message : error)}`));
           }
@@ -355,13 +337,40 @@ function postBridgeMessage(
       },
     );
 
-    if (pathName !== BRIDGE_OPEN_DIFF_PATH) {
-      req.setTimeout(HTTP_TIMEOUT_MS, () => req.destroy(new Error('bridge request timeout')));
+    if (options.timeoutMs) {
+      req.setTimeout(options.timeoutMs, () => req.destroy(new Error(options.timeoutErrorMessage || 'request timeout')));
     }
+
     req.on('error', rejectPromise);
-    req.write(body);
+
+    if (options.body) {
+      req.write(options.body);
+    }
     req.end();
   });
+}
+
+async function postBridgeMessage(
+  connection: BridgeConnection,
+  pathName: string,
+  message: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const body = JSON.stringify(message);
+  const { data } = await makeHttpRequest({
+    host: BRIDGE_HOST,
+    port: connection.port,
+    path: pathName,
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${connection.authToken}`,
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(body),
+    },
+    body,
+    timeoutMs: pathName !== BRIDGE_OPEN_DIFF_PATH ? HTTP_TIMEOUT_MS : undefined,
+    timeoutErrorMessage: 'bridge request timeout',
+  });
+  return data;
 }
 
 function waitForPiPromptOnly(reason: string): Promise<string> {
@@ -371,25 +380,20 @@ function waitForPiPromptOnly(reason: string): Promise<string> {
 }
 
 async function pingBridgeHealth(connection: BridgeConnection): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const req = http.request(
-      {
-        host: BRIDGE_HOST,
-        port: connection.port,
-        path: BRIDGE_HEALTH_PATH,
-        method: 'GET',
-        headers: {
-          authorization: `Bearer ${connection.authToken}`,
-        },
+  try {
+    const { statusCode } = await makeHttpRequest({
+      host: BRIDGE_HOST,
+      port: connection.port,
+      path: BRIDGE_HEALTH_PATH,
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${connection.authToken}`,
       },
-      (res) => {
-        resolvePromise((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300);
-        res.resume();
-      },
-    );
-
-    req.setTimeout(HTTP_TIMEOUT_MS, () => req.destroy(new Error('bridge health timeout')));
-    req.on('error', () => resolvePromise(false));
-    req.end();
-  });
+      timeoutMs: HTTP_TIMEOUT_MS,
+      timeoutErrorMessage: 'bridge health timeout',
+    });
+    return statusCode >= 200 && statusCode < 300;
+  } catch {
+    return false;
+  }
 }

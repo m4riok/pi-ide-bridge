@@ -23,9 +23,9 @@ function publishEnv(context, port, authToken, bootstrapAuthToken) {
 }
 
 function clearEnv(context) {
-  context.environmentVariableCollection.delete?.(BRIDGE_ENV_PORT_KEY);
-  context.environmentVariableCollection.delete?.(BRIDGE_ENV_AUTH_TOKEN_KEY);
-  context.environmentVariableCollection.delete?.(BRIDGE_BOOTSTRAP_AUTH_ENV_KEY);
+  context.environmentVariableCollection.delete(BRIDGE_ENV_PORT_KEY);
+  context.environmentVariableCollection.delete(BRIDGE_ENV_AUTH_TOKEN_KEY);
+  context.environmentVariableCollection.delete(BRIDGE_BOOTSTRAP_AUTH_ENV_KEY);
 }
 
 async function removeConnectionFile(fs, connectionFile) {

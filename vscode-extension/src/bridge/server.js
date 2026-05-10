@@ -5,9 +5,11 @@ const { HttpRequestError, readRequestJson, sendJson } = require('./request');
 const { BRIDGE_OPEN_DIFF_PATH, BRIDGE_CLOSE_DIFF_PATH, BRIDGE_HEALTH_PATH, BRIDGE_CONTEXT_STREAM_PATH, BRIDGE_DIAGNOSTICS_PATH } = require('../../../shared/bridge-contract.cjs');
 
 function createBridgeServer({ vscode, diffManager, editorContextService }) {
+  const MAX_SSE_CONNECTIONS = 5;
   let bridgeServer;
   let bridgePort;
   let authToken;
+  let activeSseConnections = 0;
 
   async function start() {
     authToken = createAuthToken();
@@ -63,6 +65,12 @@ function createBridgeServer({ vscode, diffManager, editorContextService }) {
         }
 
         if (req.method === 'GET' && req.url === BRIDGE_CONTEXT_STREAM_PATH) {
+          if (activeSseConnections >= MAX_SSE_CONNECTIONS) {
+            sendJson(res, 429, { ok: false, error: 'too many context streams' });
+            return;
+          }
+
+          activeSseConnections += 1;
           res.writeHead(200, {
             'content-type': 'text/event-stream',
             'cache-control': 'no-cache',
@@ -86,10 +94,18 @@ function createBridgeServer({ vscode, diffManager, editorContextService }) {
             }
           }, 15_000);
 
-          req.on('close', () => {
+          let cleaned = false;
+          const cleanup = () => {
+            if (cleaned) return;
+            cleaned = true;
             unsubscribe();
             clearInterval(keepalive);
-          });
+            activeSseConnections = Math.max(0, activeSseConnections - 1);
+          };
+
+          req.on('close', cleanup);
+          res.on('close', cleanup);
+          res.on('error', cleanup);
           return;
         }
 
@@ -111,7 +127,11 @@ function createBridgeServer({ vscode, diffManager, editorContextService }) {
         sendJson(res, 404, { ok: false, error: 'not found' });
       } catch (error) {
         if (res.headersSent || res.writableEnded || res.destroyed) {
-          try { res.end(); } catch {}
+          try {
+            res.end();
+          } catch (endError) {
+            console.debug(`Pi IDE Bridge: response end failed: ${String(endError instanceof Error ? endError.message : endError)}`);
+          }
           return;
         }
         const status = error instanceof HttpRequestError ? error.statusCode : 500;

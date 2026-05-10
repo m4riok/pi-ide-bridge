@@ -1,5 +1,6 @@
 const IDE_MAX_OPEN_FILES = 10;
 const IDE_MAX_SELECTED_TEXT_LENGTH = 16_384;
+const MAX_CONTEXT_ENTRIES = 256;
 
 function createEditorContextService(vscode) {
   const focusTimestamps = new Map();
@@ -30,18 +31,32 @@ function createEditorContextService(vscode) {
     };
   }
 
+  function enforceMapLimit(map, maxEntries) {
+    while (map.size > maxEntries) {
+      const oldestKey = map.keys().next().value;
+      if (!oldestKey) break;
+      map.delete(oldestKey);
+    }
+  }
+
+  function touchMapEntry(map, key, value) {
+    map.delete(key);
+    map.set(key, value);
+    enforceMapLimit(map, MAX_CONTEXT_ENTRIES);
+  }
+
   function recordSelection(editor) {
     const path = editor?.document?.uri?.fsPath;
     if (!path) return;
     const selectionState = getSelectionState(editor);
     if (!selectionState) return;
-    selectionStateByPath.set(path, selectionState);
+    touchMapEntry(selectionStateByPath, path, selectionState);
   }
 
   function markFocused(editor) {
     const path = editor?.document?.uri?.fsPath;
     if (!path) return;
-    focusTimestamps.set(path, Date.now());
+    touchMapEntry(focusTimestamps, path, Date.now());
     lastActivePath = path;
     recordSelection(editor);
   }
