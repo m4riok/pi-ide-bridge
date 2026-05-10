@@ -35,13 +35,13 @@
         "title": "Pi IDE Bridge: Open Diff For Approval"
       },
       {
-        "command": "piIdeBridge.openSampleDiff",
-        "title": "Pi IDE Bridge: Open Sample Diff"
-      },
-      {
         "command": "piIdeBridge.approveActiveDiff",
         "title": "Approve Change",
         "icon": "$(check)"
+      },
+      {
+        "command": "piIdeBridge.showBridgeDebug",
+        "title": "Pi IDE Bridge: Show Debug Info"
       }
     ],
     "menus": {
