@@ -3,12 +3,14 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { tmpdir } = require('node:os');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, timingSafeEqual } = require('node:crypto');
 
 const BRIDGE_HOST = '127.0.0.1';
 const AFTER_SCHEME = 'pi-ide-bridge-after';
-const CONNECTION_DIR = path.join(tmpdir(), 'pi-ide-bridge', 'ide');
+const CONNECTION_ROOT_DIR = path.join(tmpdir(), 'pi-ide-bridge');
+const CONNECTION_DIR = path.join(CONNECTION_ROOT_DIR, 'ide');
 const DIFF_VISIBLE_CONTEXT = 'pi.diff.isVisible';
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 
 const diffByRequestId = new Map();
 const afterContentByUri = new Map();
@@ -47,16 +49,29 @@ async function updateDiffVisibleContext() {
   await vscode.commands.executeCommand('setContext', DIFF_VISIBLE_CONTEXT, visible);
 }
 
+async function getExistingOrEmptyOriginalUri(fileUri) {
+  try {
+    await vscode.workspace.fs.stat(fileUri);
+    return fileUri;
+  } catch {
+    return vscode.Uri.from({
+      scheme: 'untitled',
+      path: fileUri.path,
+    });
+  }
+}
+
 async function openPayloadDiff(payload, requestId) {
   if (!payload?.filePath) throw new Error('missing filePath in payload');
 
   const key = String(requestId || Date.now());
   await closeDiffByRequestId(key, { notify: false });
 
-  const left = vscode.Uri.file(payload.filePath);
+  const fileUri = vscode.Uri.file(payload.filePath);
+  const left = await getExistingOrEmptyOriginalUri(fileUri);
   const right = vscode.Uri.from({
     scheme: AFTER_SCHEME,
-    path: left.path,
+    path: fileUri.path,
     query: `rid=${encodeURIComponent(key)}`,
   });
 
@@ -67,7 +82,6 @@ async function openPayloadDiff(payload, requestId) {
     preview: false,
     preserveFocus: true,
   });
-  await vscode.commands.executeCommand('workbench.action.files.setActiveEditorWriteableInSession');
 
   diffByRequestId.set(key, {
     requestId: key,
@@ -152,25 +166,55 @@ async function handleClosedDiffTabs() {
   await updateDiffVisibleContext();
 }
 
+class HttpRequestError extends Error {
+  constructor(message, statusCode) {
+    super(message);
+    this.name = 'HttpRequestError';
+    this.statusCode = statusCode;
+  }
+}
+
+function requestError(message, statusCode) {
+  return new HttpRequestError(message, statusCode);
+}
+
 function readRequestJson(req) {
   return new Promise((resolve, reject) => {
     let body = '';
+    let receivedBytes = 0;
+    let rejected = false;
+
     req.on('data', (chunk) => {
+      if (rejected) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_REQUEST_BODY_BYTES) {
+        rejected = true;
+        req.destroy();
+        reject(requestError('request body too large', 413));
+        return;
+      }
       body += chunk.toString('utf8');
     });
     req.on('end', () => {
+      if (rejected) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (error) {
-        reject(error);
+        reject(requestError('invalid JSON request body', 400));
       }
     });
-    req.on('error', reject);
+    req.on('error', (error) => {
+      if (!rejected) reject(error);
+    });
   });
 }
 
 function isAuthorized(req) {
-  return req.headers.authorization === `Bearer ${authToken}`;
+  if (!authToken || typeof req.headers.authorization !== 'string') return false;
+
+  const expected = Buffer.from(`Bearer ${authToken}`);
+  const actual = Buffer.from(req.headers.authorization);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 async function createBridgeServer(context) {
@@ -216,7 +260,8 @@ async function createBridgeServer(context) {
 
       sendJson(res, 404, { ok: false, error: 'not found' });
     } catch (error) {
-      sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+      const status = error instanceof HttpRequestError ? error.statusCode : 500;
+      sendJson(res, status, { ok: false, error: String(error instanceof Error ? error.message : error) });
     }
   });
 
@@ -225,12 +270,17 @@ async function createBridgeServer(context) {
     bridgeServer.on('error', reject);
   });
 
-  bridgePort = bridgeServer.address().port;
-  await fs.mkdir(CONNECTION_DIR, { recursive: true });
+  bridgePort = /** @type {import('net').AddressInfo} */ (bridgeServer.address()).port;
+  await fs.mkdir(CONNECTION_ROOT_DIR, { recursive: true, mode: 0o700 });
+  await fs.chmod(CONNECTION_ROOT_DIR, 0o700);
+  await fs.mkdir(CONNECTION_DIR, { recursive: true, mode: 0o700 });
+  await fs.chmod(CONNECTION_DIR, 0o700);
   connectionFile = path.join(CONNECTION_DIR, `pi-ide-bridge-server-${process.ppid}-${bridgePort}.json`);
   await fs.writeFile(connectionFile, JSON.stringify({ port: bridgePort, authToken }, null, 2), { mode: 0o600 });
 
   context.environmentVariableCollection.replace('PI_IDE_BRIDGE_SERVER_PORT', String(bridgePort));
+  // Required so Pi processes launched from the integrated terminal can discover the bridge.
+  // Any subprocess launched from that terminal inherits this local auth token.
   context.environmentVariableCollection.replace('PI_IDE_BRIDGE_AUTH_TOKEN', authToken);
   vscode.window.showInformationMessage(`Pi IDE Bridge listening: ${BRIDGE_HOST}:${bridgePort}`);
 }
@@ -274,7 +324,7 @@ function activate(context) {
       await openPayloadDiff(payload, payload?.requestId);
       vscode.window.showInformationMessage(`Pi IDE Bridge: opened ${payload.filePath} for review.`);
     } catch (error) {
-      vscode.window.showErrorMessage(`Pi IDE Bridge: ${String(error?.message || error)}`);
+      vscode.window.showErrorMessage(`Pi IDE Bridge: ${String(error instanceof Error ? error.message : error)}`);
     }
   });
 

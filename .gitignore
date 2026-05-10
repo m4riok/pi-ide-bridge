@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build/package outputs
+out/
+dist/
+*.vsix
+
+# Local tool caches
+/.cocoindex_code/
+.srclight/
+
+# Local runtime/editor state
+pi-extension/.vsdiff-state.json
+.claude/settings.local.json

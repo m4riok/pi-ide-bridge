@@ -1,11 +1,18 @@
 # Pi IDE Bridge — Pi Extension
 
-Pi-side extension for IDE-integrated edit approval.
+This is the Pi side of Pi IDE Bridge.
 
-## Behavior
+## What it does for you
 
-- Intercepts `edit` and `write` tool calls.
-- Opens proposed changes in the IDE companion diff view.
-- Races Pi TUI prompt against IDE approval/rejection; first decision wins.
-- `shift+~` toggles global auto-accept mode.
-- Rejected changes are stored as hidden context for the next user turn.
+- Lets you approve edits before they are applied
+- Works with VS Code so you can review changes in a diff first
+- Supports fast repeated work with auto-accept mode
+- Remembers rejected proposals so follow-up attempts can be improved
+
+## Everyday use
+
+- Start Pi in your project
+- When Pi proposes a change, review and decide
+- Turn auto-accept on or off as needed
+
+This extension is designed to keep you in control of file changes while still moving quickly.

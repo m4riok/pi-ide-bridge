@@ -1,11 +1,13 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as http from 'node:http';
 
 const BRIDGE_HOST = '127.0.0.1';
 const CONNECTION_DIR = join(tmpdir(), 'pi-ide-bridge', 'ide');
+const STARTUP_STATUS_DURATION_MS = 20_000;
+const TOGGLE_STATUS_DURATION_MS = 5_000;
 type ApprovalMode = 'ask' | 'auto';
 type ApprovalDecision = 'approved' | 'approved_auto' | 'rejected';
 
@@ -23,6 +25,8 @@ export default function (pi: ExtensionAPI) {
   let pendingRejectedChange: RejectedChange | undefined;
 
   pi.on('session_start', async (_event, ctx) => {
+    applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
+
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
@@ -66,7 +70,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Toggle edit approval mode',
     handler: async (ctx) => {
       mode = mode === 'auto' ? 'ask' : 'auto';
-      applyApprovalStatus(ctx, mode);
+      applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
     },
   });
 
@@ -78,7 +82,7 @@ export default function (pi: ExtensionAPI) {
     if (mode === 'auto') return;
 
     const filePath = resolve(ctx.cwd, pathArg);
-    const beforeText = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
+    const beforeText = await readFile(filePath, 'utf8').catch(() => '');
     const afterText = event.toolName === 'write'
       ? String((event.input as any).content ?? '')
       : applyEditPreview(beforeText, (event.input as any).edits ?? []);
@@ -100,7 +104,7 @@ export default function (pi: ExtensionAPI) {
 
     if (decision === 'approved_auto') {
       mode = 'auto';
-      applyApprovalStatus(ctx, mode);
+      applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
       await sendCloseDiff(event.toolCallId, 'approved_auto');
       return;
     }
@@ -142,7 +146,7 @@ function normalizeVscodeDecision(decision: string): ApprovalDecision {
   return 'rejected';
 }
 
-function applyApprovalStatus(ctx: any, mode: ApprovalMode) {
+function applyApprovalStatus(ctx: any, mode: ApprovalMode, durationMs: number) {
   const theme = ctx.ui?.theme;
   const base = `⏵⏵ auto-accept edits: ${mode === 'auto' ? 'on' : 'off'} (shift+~ to cycle)`;
   const text = mode === 'auto'
@@ -156,52 +160,70 @@ function applyApprovalStatus(ctx: any, mode: ApprovalMode) {
   statusHideTimer = setTimeout(() => {
     ctx.ui.setStatus('pi-ide-bridge-approval', undefined);
     ctx.ui.setWidget('pi-ide-bridge-approval', undefined);
-  }, 5_000);
+  }, durationMs);
 }
 
 function applyEditPreview(original: string, edits: Array<{ oldText: string; newText: string }>): string {
   let output = original;
   for (const edit of edits) {
     if (!edit || typeof edit.oldText !== 'string' || typeof edit.newText !== 'string') continue;
-    const idx = output.indexOf(edit.oldText);
-    if (idx === -1) continue;
+    const idx = findUniqueOccurrence(output, edit.oldText);
+    if (idx === undefined) continue;
     output = output.slice(0, idx) + edit.newText + output.slice(idx + edit.oldText.length);
   }
   return output;
 }
 
-function sendOpenDiff(payload: {
+function findUniqueOccurrence(text: string, search: string): number | undefined {
+  if (!search) return undefined;
+
+  const first = text.indexOf(search);
+  if (first === -1) return undefined;
+
+  const second = text.indexOf(search, first + 1);
+  return second === -1 ? first : undefined;
+}
+
+async function sendOpenDiff(payload: {
   filePath: string;
   beforeText: string;
   afterText: string;
   requestId: string;
 }): Promise<string> {
-  const connection = readLatestConnectionInfo();
-  if (!connection) return new Promise(() => undefined);
+  const connection = await readLatestConnectionInfo();
+  if (!connection) return waitForPiPromptOnly('no active VS Code bridge connection');
 
   return postBridgeMessage(connection, '/openDiff', payload)
     .then((res) => String(res?.decision || 'rejected'))
-    .catch(() => new Promise<string>(() => undefined));
+    .catch((error) => waitForPiPromptOnly(`VS Code bridge request failed: ${String(error?.message || error)}`));
 }
 
-function sendCloseDiff(requestId: string, decision: ApprovalDecision | 'closed_by_pi'): Promise<void> {
-  const connection = readLatestConnectionInfo();
-  if (!connection) return Promise.resolve();
+function waitForPiPromptOnly(reason: string): Promise<string> {
+  console.warn(`Pi IDE Bridge: ${reason}; waiting for Pi prompt decision.`);
+  return new Promise(() => undefined);
+}
+
+async function sendCloseDiff(requestId: string, decision: ApprovalDecision | 'closed_by_pi'): Promise<void> {
+  const connection = await readLatestConnectionInfo();
+  if (!connection) return;
   return postBridgeMessage(connection, '/closeDiff', { requestId, decision }).then(() => undefined).catch(() => undefined);
 }
 
-function readLatestConnectionInfo(): { port: number; authToken: string } | undefined {
+async function readLatestConnectionInfo(): Promise<{ port: number; authToken: string } | undefined> {
   try {
-    const files = readdirSync(CONNECTION_DIR)
-      .filter((name) => /^pi-ide-bridge-server-\d+-\d+\.json$/.test(name))
-      .map((name) => {
-        const fullPath = join(CONNECTION_DIR, name);
-        return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
-      })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const names = await readdir(CONNECTION_DIR);
+    const candidates = await Promise.all(
+      names
+        .filter((name) => /^pi-ide-bridge-server-\d+-\d+\.json$/.test(name))
+        .map(async (name) => {
+          const fullPath = join(CONNECTION_DIR, name);
+          return { fullPath, mtimeMs: (await stat(fullPath)).mtimeMs };
+        }),
+    );
 
+    const files = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
     for (const file of files) {
-      const parsed = JSON.parse(readFileSync(file.fullPath, 'utf8')) as { port?: unknown; authToken?: unknown };
+      const parsed = JSON.parse(await readFile(file.fullPath, 'utf8')) as { port?: unknown; authToken?: unknown };
       if (typeof parsed.port === 'number' && typeof parsed.authToken === 'string') {
         return { port: parsed.port, authToken: parsed.authToken };
       }

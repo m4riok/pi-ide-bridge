@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node", "vscode"],
+    "moduleResolution": "bundler"
+  },
+  "include": ["src/**/*.js"],
+  "exclude": ["node_modules"]
+}

@@ -1,17 +1,31 @@
 {
   "name": "pi-ide-bridge-vscode",
   "displayName": "Pi IDE Bridge",
+  "description": "VS Code companion extension for Pi IDE Bridge diff approval workflows.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "m4riok",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m4riok/pi-ide-bridge"
+  },
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
+  "scripts": {
+    "check": "node --check src/extension.js && tsc --noEmit -p jsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^6.0.3"
+  },
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:piIdeBridge.openDiffForApproval",
-    "onCommand:piIdeBridge.openSampleDiff",
-    "onCommand:piIdeBridge.approveActiveDiff"
+    "onStartupFinished"
   ],
   "main": "./src/extension.js",
   "contributes": {

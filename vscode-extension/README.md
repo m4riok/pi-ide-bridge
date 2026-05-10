@@ -1,11 +1,18 @@
 # Pi IDE Bridge — VS Code Extension
 
-VS Code companion extension for Pi IDE Bridge.
+This is the VS Code side of Pi IDE Bridge.
 
-## Behavior
+## What it does for you
 
-- Starts a localhost HTTP bridge on a random port.
-- Writes bridge connection info to `/tmp/pi-ide-bridge/ide/`.
-- Opens Pi edit/write proposals in a native VS Code diff editor.
-- Provides an Approve button in the diff editor title.
-- Closing the diff rejects the proposal.
+- Opens Pi’s proposed file updates in a diff view
+- Lets you approve or reject changes directly in VS Code
+- Makes reviewing edits quick and clear before anything is applied
+
+## What to expect
+
+- A proposed change appears as a diff
+- You review it in VS Code
+- You approve or reject
+- Pi continues based on your decision
+
+This extension keeps change review simple and familiar inside your editor.
