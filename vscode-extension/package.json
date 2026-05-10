@@ -1,0 +1,44 @@
+{
+  "name": "pi-ide-bridge-vscode",
+  "displayName": "Pi IDE Bridge",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:piIdeBridge.openDiffForApproval",
+    "onCommand:piIdeBridge.openSampleDiff",
+    "onCommand:piIdeBridge.approveActiveDiff"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "piIdeBridge.openDiffForApproval",
+        "title": "Pi IDE Bridge: Open Diff For Approval"
+      },
+      {
+        "command": "piIdeBridge.openSampleDiff",
+        "title": "Pi IDE Bridge: Open Sample Diff"
+      },
+      {
+        "command": "piIdeBridge.approveActiveDiff",
+        "title": "Approve Change",
+        "icon": "$(check)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "piIdeBridge.approveActiveDiff",
+          "when": "pi.diff.isVisible",
+          "group": "navigation@0"
+        }
+      ]
+    },
+    "keybindings": []
+  }
+}
