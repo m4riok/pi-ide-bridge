@@ -2,7 +2,7 @@
   "name": "pi-ide-bridge-vscode",
   "displayName": "Pi IDE Bridge",
   "description": "VS Code companion extension for Pi IDE Bridge diff approval workflows.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "m4riok",
   "license": "MIT",
   "repository": {

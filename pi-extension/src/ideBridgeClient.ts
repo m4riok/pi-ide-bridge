@@ -1,12 +1,11 @@
 import * as http from 'node:http';
-import { BOOTSTRAP_PORT, BOOTSTRAP_RETRY_BACKOFF_MS, BRIDGE_HOST } from './constants.js';
+import { BOOTSTRAP_PORT, BRIDGE_HOST } from './constants.js';
 import type { BridgeCloseDecision, BridgeConnection, DiagnosticsRequest, DiagnosticsResponse, EditorContext } from './types.js';
 import bridgeContract from './bridgeContract.js';
 
 const {
   BRIDGE_ENV_PORT_KEY,
   BRIDGE_ENV_AUTH_TOKEN_KEY,
-  BRIDGE_BOOTSTRAP_AUTH_ENV_KEY,
   BRIDGE_OPEN_DIFF_PATH,
   BRIDGE_CLOSE_DIFF_PATH,
   BRIDGE_HEALTH_PATH,
@@ -16,6 +15,7 @@ const {
 } = bridgeContract;
 
 const HTTP_TIMEOUT_MS = 5_000;
+const LOCAL_PROBE_TIMEOUT_MS = 500;
 const CONNECTION_CACHE_TTL_MS = 20_000;
 const NEGATIVE_CACHE_TTL_MS = 3_000;
 
@@ -248,38 +248,20 @@ async function resolveBridgeConnectionInfoDetailed(): Promise<ResolveResult> {
 }
 
 async function fetchBridgeConnectionWithRetry(): Promise<{ connection?: BridgeConnection; reason?: string }> {
-  let lastReason = 'Bootstrap unavailable';
-  for (let i = 0; i < BOOTSTRAP_RETRY_BACKOFF_MS.length; i++) {
-    const found = await fetchBridgeConnectionFromBootstrap();
-    if (found.connection) return found;
-    if (found.reason) lastReason = found.reason;
-    await sleep(BOOTSTRAP_RETRY_BACKOFF_MS[i]);
-  }
-  return { reason: lastReason };
+  return fetchBridgeConnectionFromBootstrap();
 }
 
 async function fetchBridgeConnectionFromBootstrap(): Promise<{ connection?: BridgeConnection; reason?: string }> {
-  const bootstrapAuthToken = process.env[BRIDGE_BOOTSTRAP_AUTH_ENV_KEY];
-  if (!bootstrapAuthToken) {
-    return { reason: 'Bootstrap auth token missing (bootstrap recovery unavailable)' };
-  }
-
   try {
-    const { statusCode, data } = await makeHttpRequest({
+    const { data } = await makeHttpRequest({
       host: BRIDGE_HOST,
       port: BOOTSTRAP_PORT,
       path: BRIDGE_BOOTSTRAP_INFO_PATH,
       method: 'GET',
-      headers: {
-        authorization: `Bearer ${bootstrapAuthToken}`,
-      },
-      timeoutMs: HTTP_TIMEOUT_MS,
+      timeoutMs: LOCAL_PROBE_TIMEOUT_MS,
       timeoutErrorMessage: 'bootstrap timeout',
     });
 
-    if (statusCode === 401) {
-      return { reason: 'Bootstrap authorization failed' };
-    }
     if (!data?.ready) {
       return { reason: 'Bootstrap is running but bridge is not ready yet' };
     }
@@ -292,13 +274,14 @@ async function fetchBridgeConnectionFromBootstrap(): Promise<{ connection?: Brid
 
     return { connection: { port, authToken } };
   } catch (error) {
-    console.warn(`Pi IDE Bridge: invalid bootstrap response: ${String(error instanceof Error ? error.message : error)}`);
-    return { reason: 'Bootstrap returned invalid JSON' };
+    const message = String(error instanceof Error ? error.message : error);
+    if (message.includes('bootstrap timeout')) return { reason: 'Bootstrap timeout' };
+    if (message.includes('ECONNREFUSED') || message.includes('ECONNRESET') || message.includes('ENOTFOUND')) {
+      return { reason: 'Bootstrap unreachable' };
+    }
+    if (message.includes('invalid JSON response from bridge')) return { reason: 'Bootstrap returned invalid JSON' };
+    return { reason: `Bootstrap request failed: ${message}` };
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 function makeHttpRequest(options: {
@@ -373,8 +356,7 @@ async function postBridgeMessage(
   return data;
 }
 
-function waitForPiPromptOnly(reason: string): Promise<string> {
-  console.warn(`Pi IDE Bridge: ${reason}; waiting for Pi prompt decision.`);
+function waitForPiPromptOnly(_reason: string): Promise<string> {
   // Intentionally never resolves so the local Pi prompt decision wins Promise.race in runtime.
   return new Promise(() => undefined);
 }
@@ -389,7 +371,7 @@ async function pingBridgeHealth(connection: BridgeConnection): Promise<boolean> 
       headers: {
         authorization: `Bearer ${connection.authToken}`,
       },
-      timeoutMs: HTTP_TIMEOUT_MS,
+      timeoutMs: LOCAL_PROBE_TIMEOUT_MS,
       timeoutErrorMessage: 'bridge health timeout',
     });
     return statusCode >= 200 && statusCode < 300;

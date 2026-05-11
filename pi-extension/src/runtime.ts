@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { RETRY_BACKOFF_MS, STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
 import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendGetDiagnostics, sendOpenDiff } from './ideBridgeClient.js';
-import { installVsCodeCompanion } from './installer.js';
+import { installVsCodeCompanion, installVsCodeCompanionFromLocalDebugVsix } from './installer.js';
 import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer } from './status.js';
 import type { ApprovalDecision, ApprovalMode, EditorContext, RejectedChange } from './types.js';
 
@@ -28,22 +28,17 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
 
     const pollIdeConnection = async () => {
-      const connected = await isIdeConnected().catch((e) => {
-        console.warn('connection poll error:', String((e as Error | undefined)?.message ?? e));
-        return false;
-      });
+      const connected = await isIdeConnected().catch(() => false);
       if (lastIdeConnected === undefined || connected !== lastIdeConnected) {
         applyConnectionStatus(ctx, connected, IDE_CONNECTION_STATUS_DURATION_MS);
         lastIdeConnected = connected;
       }
     };
 
-    await pollIdeConnection();
+    void pollIdeConnection();
     if (ideConnectionPollTimer) clearInterval(ideConnectionPollTimer);
     ideConnectionPollTimer = setInterval(() => {
-      pollIdeConnection().catch((e) => {
-        console.warn('connection poll error:', String((e as Error | undefined)?.message ?? e));
-      });
+      void pollIdeConnection();
     }, IDE_CONNECTION_POLL_MS);
 
     const reconnectDelays = RETRY_BACKOFF_MS;
@@ -258,13 +253,19 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       }
 
       if (action === 'install') {
-        const installed = await installVsCodeCompanion();
+        const useLocalDebugVsix = (parts[1] || '').toLowerCase() === 'debug';
+        const installed = useLocalDebugVsix
+          ? await installVsCodeCompanionFromLocalDebugVsix()
+          : await installVsCodeCompanion();
         if (installed) {
           ctx.ui.notify('✓ VS Code companion extension installed. Run /ide status to verify connection.', 'info');
           return;
         }
 
-        ctx.ui.notify("✕ No installer is available for IDE. Please install the 'Pi IDE Bridge' extension manually from the marketplace.", 'error');
+        const message = useLocalDebugVsix
+          ? '✕ Local debug VSIX installer failed. Build vscode-extension/pi-ide-bridge-vscode-0.2.1.vsix first.'
+          : "✕ No installer is available for IDE. Please install the 'Pi IDE Bridge' extension manually from the marketplace.";
+        ctx.ui.notify(message, 'error');
         return;
       }
 

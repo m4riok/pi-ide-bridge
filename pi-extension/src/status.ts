@@ -60,8 +60,8 @@ function safeSetConnectionStatus(ctx: any, text: string | undefined) {
   try {
     ctx.ui.setStatus('pi-ide-bridge-connection', text);
     ctx.ui.setWidget('pi-ide-bridge-connection', text ? [text] : undefined, { placement: 'belowEditor' });
-  } catch (error) {
-    console.warn(`Pi IDE Bridge: failed to set connection status UI: ${String((error as Error)?.message || error)}`);
+  } catch {
+    // Status UI failures must not write to stdout/stderr and disrupt the TUI.
   }
 }
 
@@ -85,8 +85,8 @@ export function applyIdeContextStatus(ctx: any, context: EditorContext | undefin
       : `◉  In ${basename(active.path)}`;
     const text = formatDeepBluePurple(ctx, base);
     safeSetContextStatus(ctx, text);
-  } catch (error) {
-    console.warn(`Pi IDE Bridge: failed to set IDE context status UI: ${String((error as Error)?.message || error)}`);
+  } catch {
+    // Status UI failures must not write to stdout/stderr and disrupt the TUI.
   }
 }
 
@@ -100,8 +100,8 @@ function safeSetContextStatus(ctx: any, text: string | undefined) {
   try {
     ctx.ui.setStatus('pi-ide-bridge-context', text);
     ctx.ui.setWidget('pi-ide-bridge-context', text ? [text] : undefined, { placement: 'belowEditor' });
-  } catch (error) {
-    console.warn(`Pi IDE Bridge: failed to set context status UI: ${String((error as Error)?.message || error)}`);
+  } catch {
+    // Status UI failures must not write to stdout/stderr and disrupt the TUI.
   }
 }
 
@@ -109,7 +109,7 @@ function safeSetApprovalStatus(ctx: any, text: string | undefined) {
   try {
     ctx.ui.setStatus('pi-ide-bridge-approval', text);
     ctx.ui.setWidget('pi-ide-bridge-approval', text ? [text] : undefined, { placement: 'belowEditor' });
-  } catch (error) {
-    console.warn(`Pi IDE Bridge: failed to set approval status UI: ${String((error as Error)?.message || error)}`);
+  } catch {
+    // Status UI failures must not write to stdout/stderr and disrupt the TUI.
   }
 }
