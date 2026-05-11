@@ -2,7 +2,7 @@ const http = require('node:http');
 const { BRIDGE_HOST } = require('../common/constants');
 const { createAuthToken, isAuthorized } = require('./auth');
 const { HttpRequestError, readRequestJson, sendJson } = require('./request');
-const { BRIDGE_OPEN_DIFF_PATH, BRIDGE_CLOSE_DIFF_PATH, BRIDGE_HEALTH_PATH, BRIDGE_CONTEXT_STREAM_PATH, BRIDGE_DIAGNOSTICS_PATH } = require('../../../shared/bridge-contract.cjs');
+const { BRIDGE_OPEN_DIFF_PATH, BRIDGE_CLOSE_DIFF_PATH, BRIDGE_HEALTH_PATH, BRIDGE_CONTEXT_STREAM_PATH, BRIDGE_DIAGNOSTICS_PATH } = require('../common/bridge-contract.cjs');
 
 function createBridgeServer({ vscode, diffManager, editorContextService }) {
   const MAX_SSE_CONNECTIONS = 5;

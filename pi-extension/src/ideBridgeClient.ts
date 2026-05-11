@@ -1,7 +1,7 @@
 import * as http from 'node:http';
 import { BOOTSTRAP_PORT, BOOTSTRAP_RETRY_BACKOFF_MS, BRIDGE_HOST } from './constants.js';
 import type { BridgeCloseDecision, BridgeConnection, DiagnosticsRequest, DiagnosticsResponse, EditorContext } from './types.js';
-import bridgeContract from '../../shared/bridge-contract.cjs';
+import bridgeContract from './bridgeContract.js';
 
 const {
   BRIDGE_ENV_PORT_KEY,

@@ -1,4 +1,4 @@
-const { BRIDGE_HOST, BRIDGE_BOOTSTRAP_PORT } = require('../../../shared/bridge-contract.cjs');
+const { BRIDGE_HOST, BRIDGE_BOOTSTRAP_PORT } = require('./bridge-contract.cjs');
 const AFTER_SCHEME = 'pi-ide-bridge-after';
 const DIFF_VISIBLE_CONTEXT = 'pi.diff.isVisible';
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;

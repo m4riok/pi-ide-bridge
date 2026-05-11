@@ -1,4 +1,4 @@
-declare module '../../shared/bridge-contract.cjs' {
+declare module './bridge-contract.cjs' {
   export const BRIDGE_HOST: string;
   export const BRIDGE_BOOTSTRAP_PORT: number;
   export const BRIDGE_ENV_PORT_KEY: string;
@@ -7,6 +7,8 @@ declare module '../../shared/bridge-contract.cjs' {
   export const BRIDGE_OPEN_DIFF_PATH: string;
   export const BRIDGE_CLOSE_DIFF_PATH: string;
   export const BRIDGE_HEALTH_PATH: string;
+  export const BRIDGE_CONTEXT_STREAM_PATH: string;
+  export const BRIDGE_DIAGNOSTICS_PATH: string;
   export const BRIDGE_BOOTSTRAP_INFO_PATH: string;
 
   const contract: {
@@ -18,6 +20,8 @@ declare module '../../shared/bridge-contract.cjs' {
     BRIDGE_OPEN_DIFF_PATH: string;
     BRIDGE_CLOSE_DIFF_PATH: string;
     BRIDGE_HEALTH_PATH: string;
+    BRIDGE_CONTEXT_STREAM_PATH: string;
+    BRIDGE_DIAGNOSTICS_PATH: string;
     BRIDGE_BOOTSTRAP_INFO_PATH: string;
   };
 

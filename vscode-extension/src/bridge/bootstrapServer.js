@@ -2,7 +2,7 @@ const http = require('node:http');
 const { timingSafeEqual } = require('node:crypto');
 const { BRIDGE_HOST, BOOTSTRAP_PORT } = require('../common/constants');
 const { sendJson } = require('./request');
-const { BRIDGE_BOOTSTRAP_INFO_PATH } = require('../../../shared/bridge-contract.cjs');
+const { BRIDGE_BOOTSTRAP_INFO_PATH } = require('../common/bridge-contract.cjs');
 
 function createBootstrapServer(vscode) {
   let server;

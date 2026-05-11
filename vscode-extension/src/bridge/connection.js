@@ -1,6 +1,6 @@
 const path = require('node:path');
 const { tmpdir } = require('node:os');
-const { BRIDGE_ENV_PORT_KEY, BRIDGE_ENV_AUTH_TOKEN_KEY, BRIDGE_BOOTSTRAP_AUTH_ENV_KEY } = require('../../../shared/bridge-contract.cjs');
+const { BRIDGE_ENV_PORT_KEY, BRIDGE_ENV_AUTH_TOKEN_KEY, BRIDGE_BOOTSTRAP_AUTH_ENV_KEY } = require('../common/bridge-contract.cjs');
 
 const CONNECTION_ROOT_DIR = path.join(tmpdir(), 'pi-ide-bridge');
 const CONNECTION_DIR = path.join(CONNECTION_ROOT_DIR, 'ide');

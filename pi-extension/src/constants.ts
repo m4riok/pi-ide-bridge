@@ -1,4 +1,4 @@
-import bridgeContract from '../../shared/bridge-contract.cjs';
+import bridgeContract from './bridgeContract.js';
 
 export const BRIDGE_HOST = bridgeContract.BRIDGE_HOST;
 export const BOOTSTRAP_PORT = bridgeContract.BRIDGE_BOOTSTRAP_PORT;
