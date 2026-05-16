@@ -278,17 +278,17 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       }
 
       if (action === 'install') {
-        const useLocalDebugVsix = (parts[1] || '').toLowerCase() === 'debug';
-        const installed = useLocalDebugVsix
-          ? await installVsCodeCompanionFromLocalDebugVsix()
+        const vsixPath = parts[1] || '';
+        const installed = vsixPath
+          ? await installVsCodeCompanionFromLocalDebugVsix(vsixPath)
           : await installVsCodeCompanion();
         if (installed) {
           ctx.ui.notify('✓ VS Code companion extension installed. Run /ide status to verify connection.', 'info');
           return;
         }
 
-        const message = useLocalDebugVsix
-          ? '✕ Local debug VSIX installer failed. Build vscode-extension/pi-ide-bridge-vscode-0.2.1.vsix first.'
+        const message = vsixPath
+          ? `✕ Failed to install VSIX from path: ${vsixPath}`
           : "✕ No installer is available for IDE. Please install the 'Pi IDE Bridge' extension manually from the marketplace.";
         ctx.ui.notify(message, 'error');
         return;
