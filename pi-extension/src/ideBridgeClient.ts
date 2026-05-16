@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import { BOOTSTRAP_PORT, BRIDGE_HOST } from './constants.js';
+import { BOOTSTRAP_PORT, BOOTSTRAP_RETRY_BACKOFF_MS, BRIDGE_HOST } from './constants.js';
 import type { BridgeCloseDecision, BridgeConnection, DiagnosticsRequest, DiagnosticsResponse, EditorContext } from './types.js';
 import bridgeContract from './bridgeContract.js';
 
@@ -11,7 +11,7 @@ const {
   BRIDGE_HEALTH_PATH,
   BRIDGE_CONTEXT_STREAM_PATH,
   BRIDGE_DIAGNOSTICS_PATH,
-  BRIDGE_BOOTSTRAP_INFO_PATH,
+  BRIDGE_BOOTSTRAP_RESOLVE_PATH,
 } = bridgeContract;
 
 const HTTP_TIMEOUT_MS = 5_000;
@@ -155,9 +155,12 @@ export function connectContextStream(
 export async function getIdeConnectionStatus(theme?: { fg?: (name: any, text: string) => string }): Promise<{ type: 'info'; text: string }> {
   const diag = await getIdeConnectionDiagnostics();
   if (!diag.connected) {
+    const suffix = diag.reason.includes('unreachable') || diag.reason.includes('timeout')
+      ? ' Please ensure the extension is running. To install the extension, run /ide install.'
+      : '';
     return {
       type: 'info',
-      text: `${colorDot(theme, false)} disconnected from IDE: ${diag.reason}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      text: `${colorDot(theme, false)} disconnected from IDE: ${diag.reason}.${suffix}`,
     };
   }
 
@@ -257,40 +260,75 @@ async function resolveBridgeConnectionInfoDetailed(): Promise<ResolveResult> {
   return result;
 }
 
+type ResolveOutcome =
+  | { status: 'ready'; connection: BridgeConnection }
+  | { status: 'not_found'; reason: string }
+  | { status: 'error'; reason: string };
+
 async function fetchBridgeConnectionWithRetry(): Promise<{ connection?: BridgeConnection; reason?: string }> {
-  return fetchBridgeConnectionFromBootstrap();
+  let lastReason = 'Bootstrap resolve failed';
+  for (const delay of BOOTSTRAP_RETRY_BACKOFF_MS) {
+    const outcome = await resolveViaBootstrap();
+    if (outcome.status === 'ready') return { connection: outcome.connection };
+    lastReason = outcome.reason;
+    if (outcome.status !== 'not_found') break; // don't retry hard errors or ambiguity
+    await new Promise<void>((r) => setTimeout(r, delay));
+  }
+  return { reason: lastReason };
 }
 
-async function fetchBridgeConnectionFromBootstrap(): Promise<{ connection?: BridgeConnection; reason?: string }> {
+async function resolveViaBootstrap(): Promise<ResolveOutcome> {
   try {
+    const body = JSON.stringify({
+      piPid: process.pid,
+      piParentPid: process.ppid,
+      cwd: process.cwd(),
+    });
     const { data } = await makeHttpRequest({
       host: BRIDGE_HOST,
       port: BOOTSTRAP_PORT,
-      path: BRIDGE_BOOTSTRAP_INFO_PATH,
-      method: 'GET',
+      path: BRIDGE_BOOTSTRAP_RESOLVE_PATH,
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+      body,
       timeoutMs: LOCAL_PROBE_TIMEOUT_MS,
       timeoutErrorMessage: 'bootstrap timeout',
     });
 
-    if (!data?.ready) {
-      return { reason: 'Bootstrap is running but bridge is not ready yet' };
+    if (data?.status === 'ready') {
+      const bridge = data.bridge as Record<string, unknown>;
+      const port = Number(bridge?.port);
+      const authToken = typeof bridge?.authToken === 'string' ? bridge.authToken : '';
+      if (!Number.isInteger(port) || port <= 0 || port > 65535 || !authToken) {
+        return { status: 'error', reason: 'Bootstrap returned invalid bridge payload' };
+      }
+      return { status: 'ready', connection: { port, authToken } };
     }
 
-    const port = Number(data?.port);
-    const authToken = typeof data?.authToken === 'string' ? data.authToken : '';
-    if (!Number.isInteger(port) || port <= 0 || port > 65535 || !authToken) {
-      return { reason: 'Bootstrap returned invalid bridge payload' };
+    if (data?.status === 'not_found') {
+      return { status: 'not_found', reason: String(data?.reason ?? 'No matching VS Code window found') };
     }
 
-    return { connection: { port, authToken } };
+    if (data?.status === 'ambiguous') {
+      const count = Array.isArray(data?.candidates) ? (data.candidates as unknown[]).length : 0;
+      const reason = count <= 1
+        ? 'Could not identify a matching VS Code workspace'
+        : 'Could not identify a unique VS Code workspace — multiple windows matched';
+      return { status: 'error', reason };
+    }
+
+    return { status: 'error', reason: 'Bootstrap returned unexpected response' };
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error);
-    if (message.includes('bootstrap timeout')) return { reason: 'Bootstrap timeout' };
+    if (message.includes('bootstrap timeout')) return { status: 'error', reason: 'Bootstrap timeout' };
     if (message.includes('ECONNREFUSED') || message.includes('ECONNRESET') || message.includes('ENOTFOUND')) {
-      return { reason: 'Bootstrap unreachable' };
+      return { status: 'error', reason: 'Bootstrap unreachable' };
     }
-    if (message.includes('invalid JSON response from bridge')) return { reason: 'Bootstrap returned invalid JSON' };
-    return { reason: `Bootstrap request failed: ${message}` };
+    if (message.includes('invalid JSON response from bridge')) return { status: 'error', reason: 'Bootstrap returned invalid JSON' };
+    return { status: 'error', reason: `Bootstrap request failed: ${message}` };
   }
 }
 

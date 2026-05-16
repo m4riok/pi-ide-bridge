@@ -9,6 +9,7 @@ export const BRIDGE_HEALTH_PATH = '/health';
 export const BRIDGE_CONTEXT_STREAM_PATH = '/context/stream';
 export const BRIDGE_DIAGNOSTICS_PATH = '/diagnostics';
 export const BRIDGE_BOOTSTRAP_INFO_PATH = '/bridgeInfo';
+export const BRIDGE_BOOTSTRAP_RESOLVE_PATH = '/resolveBridgeForPi';
 
 const bridgeContract = {
   BRIDGE_HOST,
@@ -22,6 +23,7 @@ const bridgeContract = {
   BRIDGE_CONTEXT_STREAM_PATH,
   BRIDGE_DIAGNOSTICS_PATH,
   BRIDGE_BOOTSTRAP_INFO_PATH,
+  BRIDGE_BOOTSTRAP_RESOLVE_PATH,
 } as const;
 
 export default bridgeContract;
