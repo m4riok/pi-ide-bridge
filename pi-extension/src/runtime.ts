@@ -1,18 +1,20 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { RETRY_BACKOFF_MS, STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
 import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendGetDiagnostics, sendOpenDiff } from './ideBridgeClient.js';
 import { installVsCodeCompanion, installVsCodeCompanionFromLocalDebugVsix } from './installer.js';
-import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer } from './status.js';
+import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer, disposeStatusBar, getStatusRenderMode, setStatusRenderMode, type StatusRenderMode } from './status.js';
 import type { ApprovalDecision, ApprovalMode, EditorContext, RejectedChange } from './types.js';
 
-const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug | /ide diagnostics [active|all|file <absolutePath>]';
+const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug | /ide diagnostics [active|all|file <absolutePath>] | /ide status-mode [widget|status]';
 const IDE_CONNECTION_POLL_MS = 7_000;
 const IDE_CONNECTION_STATUS_DURATION_MS = 3_000;
 const IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS = 200;
+const PI_IDE_BRIDGE_SETTINGS_KEY = 'piIdeBridge';
 
 export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
   let mode: ApprovalMode = 'ask';
@@ -25,6 +27,9 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
   let contextReconnectAttempt = 0;
 
   pi.on('session_start', async (_event, ctx) => {
+    const configuredRenderMode = await loadStatusRenderMode(ctx.cwd);
+    setStatusRenderMode(ctx, configuredRenderMode);
+
     applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
 
     const pollIdeConnection = async () => {
@@ -116,6 +121,7 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
     contextReconnectAttempt = 0;
     liveContext = undefined;
     applyIdeContextStatus(ctx, undefined);
+    disposeStatusBar(ctx);
     lastIdeConnected = undefined;
   });
 
@@ -192,8 +198,27 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       const action = (parts[0] || '').toLowerCase();
 
       if (!action || action === 'status') {
-        const status = await getIdeConnectionStatus();
+        const status = await getIdeConnectionStatus(ctx.ui?.theme);
         ctx.ui.notify(status.text, status.type);
+        return;
+      }
+
+      if (action === 'status-mode') {
+        const requested = (parts[1] || '').toLowerCase();
+        if (!requested) {
+          ctx.ui.notify(`Pi IDE Bridge status mode: ${getStatusRenderMode()}`, 'info');
+          return;
+        }
+
+        if (requested !== 'widget' && requested !== 'status') {
+          ctx.ui.notify('Usage: /ide status-mode [widget|status]', 'error');
+          return;
+        }
+
+        const renderMode = requested as StatusRenderMode;
+        setStatusRenderMode(ctx, renderMode);
+        await saveStatusRenderMode(ctx.cwd, renderMode);
+        ctx.ui.notify(`Pi IDE Bridge status mode set to ${renderMode}.`, 'info');
         return;
       }
 
@@ -421,4 +446,63 @@ function isAbortError(error: unknown): boolean {
 
 function waitForDecisionFallback(): Promise<ApprovalDecision> {
   return new Promise(() => undefined);
+}
+
+async function loadStatusRenderMode(cwd: string): Promise<StatusRenderMode> {
+  const projectPath = resolve(cwd, '.pi/settings.json');
+  const projectMode = await readStatusRenderModeFromSettingsFile(projectPath);
+  if (projectMode) return projectMode;
+
+  const globalPath = resolve(homedir(), '.pi/agent/settings.json');
+  const globalMode = await readStatusRenderModeFromSettingsFile(globalPath);
+  if (globalMode) return globalMode;
+
+  return 'widget';
+}
+
+async function saveStatusRenderMode(cwd: string, mode: StatusRenderMode): Promise<void> {
+  const projectPath = resolve(cwd, '.pi/settings.json');
+  const projectMode = await readStatusRenderModeFromSettingsFile(projectPath);
+  if (projectMode !== null) {
+    await writeStatusRenderModeToSettingsFile(projectPath, mode);
+    return;
+  }
+
+  const globalPath = resolve(homedir(), '.pi/agent/settings.json');
+  await writeStatusRenderModeToSettingsFile(globalPath, mode);
+}
+
+async function readStatusRenderModeFromSettingsFile(path: string): Promise<StatusRenderMode | null> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    const parsed = JSON.parse(raw) as any;
+    const mode = parsed?.[PI_IDE_BRIDGE_SETTINGS_KEY]?.statusMode;
+    if (mode === 'widget' || mode === 'status') return mode;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeStatusRenderModeToSettingsFile(path: string, mode: StatusRenderMode): Promise<void> {
+  let parsed: any = {};
+  try {
+    const raw = await readFile(path, 'utf8');
+    parsed = JSON.parse(raw) as any;
+  } catch {
+    parsed = {};
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    parsed = {};
+  }
+
+  const existingSection = parsed[PI_IDE_BRIDGE_SETTINGS_KEY];
+  parsed[PI_IDE_BRIDGE_SETTINGS_KEY] = {
+    ...(existingSection && typeof existingSection === 'object' ? existingSection : {}),
+    statusMode: mode,
+  };
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 }

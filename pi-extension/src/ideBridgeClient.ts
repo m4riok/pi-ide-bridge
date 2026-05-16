@@ -152,16 +152,26 @@ export function connectContextStream(
   };
 }
 
-export async function getIdeConnectionStatus(): Promise<{ type: 'info'; text: string }> {
+export async function getIdeConnectionStatus(theme?: { fg?: (name: any, text: string) => string }): Promise<{ type: 'info'; text: string }> {
   const diag = await getIdeConnectionDiagnostics();
   if (!diag.connected) {
     return {
       type: 'info',
-      text: `🔴 Disconnected: ${diag.reason}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      text: `${colorDot(theme, false)} disconnected from IDE: ${diag.reason}. Please ensure the extension is running. To install the extension, run /ide install.`,
     };
   }
 
-  return { type: 'info', text: '🟢 Connected to VS Code' };
+  return { type: 'info', text: `${colorDot(theme, true)} ${colorAccent(theme, 'connected to IDE')}` };
+}
+
+function colorAccent(theme: { fg?: (name: any, text: string) => string } | undefined, text: string): string {
+  if (!theme?.fg) return text;
+  return theme.fg('accent', text);
+}
+
+function colorDot(theme: { fg?: (name: any, text: string) => string } | undefined, connected: boolean): string {
+  if (!theme?.fg) return '●';
+  return connected ? theme.fg('success', '●') : theme.fg('error', '●');
 }
 
 export async function isIdeConnected(): Promise<boolean> {
