@@ -1,6 +1,6 @@
 {
   "name": "@m4riok/pi-ide-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension for VS Code diff approval workflows and editor context bridging.",
   "license": "MIT",
   "repository": {
