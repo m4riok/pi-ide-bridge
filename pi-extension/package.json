@@ -34,5 +34,8 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "dependencies": {
+    "string-width": "^8.2.1"
   }
 }
