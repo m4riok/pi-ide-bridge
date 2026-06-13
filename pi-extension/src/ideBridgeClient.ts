@@ -30,13 +30,19 @@ export async function sendOpenDiff(payload: {
   beforeText: string;
   afterText: string;
   requestId: string;
-}): Promise<string> {
+}, options: { rejectOnUnavailable?: boolean } = {}): Promise<string> {
   const connection = await resolveBridgeConnectionInfo();
-  if (!connection) return waitForPiPromptOnly('no active VS Code bridge connection');
+  if (!connection) {
+    if (options.rejectOnUnavailable) throw new Error('no active VS Code bridge connection');
+    return waitForPiPromptOnly('no active VS Code bridge connection');
+  }
 
   return postBridgeMessage(connection, BRIDGE_OPEN_DIFF_PATH, payload)
     .then((res) => String(res?.decision || 'rejected'))
-    .catch((error) => waitForPiPromptOnly(`VS Code bridge request failed: ${String(error?.message || error)}`));
+    .catch((error) => {
+      if (options.rejectOnUnavailable) throw error;
+      return waitForPiPromptOnly(`VS Code bridge request failed: ${String(error?.message || error)}`);
+    });
 }
 
 export async function sendCloseDiff(requestId: string, decision: BridgeCloseDecision): Promise<void> {

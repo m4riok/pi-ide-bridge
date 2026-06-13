@@ -2,6 +2,31 @@ export type ApprovalMode = 'ask' | 'auto';
 export type ApprovalDecision = 'approved' | 'approved_auto' | 'rejected';
 export type BridgeCloseDecision = 'approved' | 'rejected' | 'closed_by_pi';
 
+export type ApprovalProxyRequest = {
+  version: 1;
+  token: string;
+  proxyRequestId: string;
+  requestId: string;
+  toolName: 'edit' | 'write';
+  pathArg: string;
+  filePath: string;
+  beforeText: string;
+  afterText: string;
+  requestedAt: number;
+  pid?: number;
+  cwd?: string;
+};
+
+export type ApprovalProxyResponse = {
+  version: 1;
+  token: string;
+  proxyRequestId: string;
+  requestId: string;
+  decision: ApprovalDecision;
+  respondedAt: number;
+  message?: string;
+};
+
 export type RejectedChange = {
   filePath: string;
   beforeText: string;

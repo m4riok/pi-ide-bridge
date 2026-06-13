@@ -5,10 +5,11 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { RETRY_BACKOFF_MS, STARTUP_STATUS_DURATION_MS, TOGGLE_STATUS_DURATION_MS } from './constants.js';
 import { applyEditPreview } from './editPreview.js';
+import { getApprovalModeFromEnvironment, getInheritedApprovalMode, hasParentApprovalProxy, requestApprovalFromParentProxy, setApprovalModeEnvironment, startParentApprovalProxy, type ParentApprovalProxyHandle } from './approvalProxy.js';
 import { connectContextStream, getIdeConnectionDebugInfo, getIdeConnectionStatus, isIdeConnected, sendCloseDiff, sendGetDiagnostics, sendOpenDiff } from './ideBridgeClient.js';
 import { installVsCodeCompanion, installVsCodeCompanionFromLocalDebugVsix } from './installer.js';
 import { applyApprovalStatus, applyConnectionStatus, applyIdeContextStatus, clearApprovalStatusTimer, clearConnectionStatusTimer, disposeStatusBar, getStatusRenderMode, setStatusRenderMode, type StatusRenderMode } from './status.js';
-import type { ApprovalDecision, ApprovalMode, EditorContext, RejectedChange } from './types.js';
+import type { ApprovalDecision, ApprovalMode, ApprovalProxyRequest, EditorContext, RejectedChange } from './types.js';
 
 const IDE_USAGE = 'Usage: /ide | /ide status | /ide context | /ide install | /ide debug | /ide diagnostics [active|all|file <absolutePath>] | /ide status-mode [widget|status]';
 const IDE_CONNECTION_POLL_MS = 7_000;
@@ -16,9 +17,26 @@ const IDE_CONNECTION_STATUS_DURATION_MS = 3_000;
 const IDE_CONTEXT_SELECTED_PREVIEW_MAX_CHARS = 200;
 const PI_IDE_BRIDGE_SETTINGS_KEY = 'piIdeBridge';
 
+type ApprovalRequest = {
+  requestId: string;
+  toolName: 'edit' | 'write';
+  pathArg: string;
+  filePath: string;
+  beforeText: string;
+  afterText: string;
+};
+
+class ApprovalUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApprovalUnavailableError';
+  }
+}
+
 export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
-  let mode: ApprovalMode = 'ask';
+  let mode: ApprovalMode = getInheritedApprovalMode();
   let pendingRejectedChange: RejectedChange | undefined;
+  let parentApprovalProxy: ParentApprovalProxyHandle | undefined;
   let ideConnectionPollTimer: ReturnType<typeof setInterval> | undefined;
   let lastIdeConnected: boolean | undefined;
   let liveContext: EditorContext | undefined;
@@ -26,7 +44,114 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
   let contextReconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let contextReconnectAttempt = 0;
 
+  async function startApprovalProxyIfPossible(ctx: any): Promise<void> {
+    if (ctx.hasUI !== true) return;
+
+    parentApprovalProxy?.stop();
+    parentApprovalProxy = undefined;
+
+    try {
+      parentApprovalProxy = await startParentApprovalProxy(
+        mode,
+        (request) => handleParentApprovalRequest(ctx, request),
+        (message) => console.warn(message),
+      );
+    } catch (error) {
+      console.warn(`Pi IDE Bridge: approval proxy failed to start: ${String(error instanceof Error ? error.message : error)}`);
+    }
+  }
+
+  async function handleParentApprovalRequest(ctx: any, request: ApprovalProxyRequest): Promise<ApprovalDecision> {
+    if (mode === 'auto') return 'approved';
+
+    const approval: ApprovalRequest = {
+      requestId: `child-${request.proxyRequestId}`,
+      toolName: request.toolName,
+      pathArg: request.pathArg,
+      filePath: request.filePath,
+      beforeText: request.beforeText,
+      afterText: request.afterText,
+    };
+    const decision = await requestLocalApproval(ctx, approval);
+    await applyApprovalDecision(ctx, approval, decision, { closeDiff: true, recordRejected: false });
+    return decision;
+  }
+
+  async function requestLocalApproval(ctx: any, request: ApprovalRequest): Promise<ApprovalDecision> {
+    const canPromptInPi = ctx.hasUI === true;
+    const piPromptAbort = new AbortController();
+
+    const vscodeDecisionPromise = sendOpenDiff(
+      {
+        filePath: request.filePath,
+        beforeText: request.beforeText,
+        afterText: request.afterText,
+        requestId: request.requestId,
+      },
+      { rejectOnUnavailable: !canPromptInPi },
+    ).then((decision) => {
+      piPromptAbort.abort();
+      return normalizeVscodeDecision(decision);
+    }).catch((error) => {
+      if (!canPromptInPi) {
+        throw new ApprovalUnavailableError([
+          `Pi IDE Bridge: edit approval required for ${request.pathArg}, but this Pi session has no UI and IDE bridge is unavailable.`,
+          `Reason: ${String(error instanceof Error ? error.message : error)}.`,
+          'Enable auto-accept mode in the parent session, connect VS Code bridge, or run from an interactive parent session.',
+        ].join(' '));
+      }
+      return waitForDecisionFallback();
+    });
+
+    if (!canPromptInPi) return vscodeDecisionPromise;
+
+    const piDecisionPromise = askPiDecision(ctx, request.pathArg, piPromptAbort.signal).catch((error) => {
+      if (isAbortError(error)) {
+        return waitForDecisionFallback();
+      }
+      throw error;
+    });
+
+    return Promise.race([vscodeDecisionPromise, piDecisionPromise]);
+  }
+
+  async function applyApprovalDecision(
+    ctx: any,
+    request: ApprovalRequest,
+    decision: ApprovalDecision,
+    options: { closeDiff: boolean; recordRejected: boolean },
+  ): Promise<{ block: true; reason: string } | undefined> {
+    if (decision === 'approved_auto') {
+      mode = 'auto';
+      persistApprovalMode(pi, mode);
+      applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
+      if (options.closeDiff) await sendCloseDiff(request.requestId, 'approved');
+      return undefined;
+    }
+
+    if (decision === 'approved') {
+      if (options.closeDiff) await sendCloseDiff(request.requestId, 'approved');
+      return undefined;
+    }
+
+    if (options.recordRejected) {
+      const rejected: RejectedChange = {
+        filePath: request.filePath,
+        beforeText: request.beforeText,
+        afterText: request.afterText,
+        rejectedAt: Date.now(),
+      };
+      pendingRejectedChange = rejected;
+      pi.appendEntry('pi-ide-bridge-rejected-change', rejected);
+    }
+
+    if (options.closeDiff) await sendCloseDiff(request.requestId, 'rejected');
+    return { block: true, reason: `User rejected update to ${request.pathArg}` };
+  }
+
   pi.on('session_start', async (_event, ctx) => {
+    mode = getInheritedApprovalMode(mode);
+
     const configuredRenderMode = await loadStatusRenderMode(ctx.cwd);
     setStatusRenderMode(ctx, configuredRenderMode);
 
@@ -102,10 +227,13 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       }
     }
 
+    await startApprovalProxyIfPossible(ctx);
     applyApprovalStatus(ctx, mode, STARTUP_STATUS_DURATION_MS);
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
+    parentApprovalProxy?.stop();
+    parentApprovalProxy = undefined;
     clearApprovalStatusTimer();
     clearConnectionStatusTimer();
     if (ideConnectionPollTimer) {
@@ -354,7 +482,14 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
 
     const pathArg = String((event.input as any).path || '');
     if (!pathArg) return;
-    if (mode === 'auto') return;
+
+    const hasUi = ctx.hasUI === true;
+    const shouldAskParent = !hasUi && hasParentApprovalProxy();
+    if (hasUi) {
+      if (mode === 'auto') return;
+    } else if (!shouldAskParent && getApprovalModeFromEnvironment() === 'auto') {
+      return;
+    }
 
     const filePath = resolve(ctx.cwd, pathArg);
     const beforeText = await readFile(filePath, 'utf8').catch(() => '');
@@ -366,55 +501,51 @@ export default function createPiIdeBridgeExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Pi IDE Bridge: ${preview.skippedCount} edit preview segment(s) could not be mapped exactly.`, 'info');
     }
 
-    const piPromptAbort = new AbortController();
-
-    const vscodeDecisionPromise = sendOpenDiff({ filePath, beforeText, afterText, requestId: event.toolCallId })
-      .then((decision) => normalizeVscodeDecision(decision))
-      .catch((error) => {
-        ctx.ui.notify(`Pi IDE Bridge: IDE review unavailable (${String(error instanceof Error ? error.message : error)}). Falling back to Pi prompt.`, 'info');
-        return new Promise<ApprovalDecision>(() => undefined);
-      });
-
-    const piDecisionPromise = askPiDecision(ctx, pathArg, piPromptAbort.signal).catch((error) => {
-      if (isAbortError(error)) {
-        return waitForDecisionFallback();
-      }
-      throw error;
-    });
-
-    const decision = await Promise.race([
-      vscodeDecisionPromise.then((d) => {
-        piPromptAbort.abort();
-        return d;
-      }),
-      piDecisionPromise,
-    ]);
-
-    if (decision === 'approved_auto') {
-      mode = 'auto';
-      persistApprovalMode(pi, mode);
-      applyApprovalStatus(ctx, mode, TOGGLE_STATUS_DURATION_MS);
-      await sendCloseDiff(event.toolCallId, 'approved');
-      return;
-    }
-
-    if (decision === 'approved') {
-      await sendCloseDiff(event.toolCallId, 'approved');
-      return;
-    }
-
-    const rejected: RejectedChange = {
+    const approval: ApprovalRequest = {
+      requestId: event.toolCallId,
+      toolName: event.toolName,
+      pathArg,
       filePath,
       beforeText,
       afterText,
-      rejectedAt: Date.now(),
     };
-    pendingRejectedChange = rejected;
-    pi.appendEntry('pi-ide-bridge-rejected-change', rejected);
 
-    await sendCloseDiff(event.toolCallId, 'rejected');
-    ctx.abort();
-    return { block: true, reason: `User rejected update to ${pathArg}` };
+    let decision: ApprovalDecision;
+    let closeDiff = true;
+
+    try {
+      if (!hasUi) {
+        const parentDecision = shouldAskParent
+          ? await requestApprovalFromParentProxy({
+            requestId: event.toolCallId,
+            toolName: event.toolName,
+            pathArg,
+            filePath,
+            beforeText,
+            afterText,
+            cwd: ctx.cwd,
+          }, ctx.signal)
+          : undefined;
+
+        if (parentDecision) {
+          decision = parentDecision === 'approved_auto' ? 'approved' : parentDecision;
+          closeDiff = false;
+        } else if (getApprovalModeFromEnvironment() === 'auto') {
+          return;
+        } else {
+          decision = await requestLocalApproval(ctx, approval);
+        }
+      } else {
+        decision = await requestLocalApproval(ctx, approval);
+      }
+    } catch (error) {
+      if (error instanceof ApprovalUnavailableError) {
+        return { block: true, reason: error.message };
+      }
+      throw error;
+    }
+
+    return applyApprovalDecision(ctx, approval, decision, { closeDiff, recordRejected: true });
   });
 }
 
@@ -436,6 +567,7 @@ function normalizeVscodeDecision(decision: string): ApprovalDecision {
 }
 
 function persistApprovalMode(pi: ExtensionAPI, mode: ApprovalMode): void {
+  setApprovalModeEnvironment(mode);
   pi.appendEntry('pi-ide-bridge-approval-mode', { mode, updatedAt: Date.now() });
 }
 
