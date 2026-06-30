@@ -209,12 +209,27 @@ function bridgePayload(record) {
   return { port: record.bridgePort, authToken: record.bridgeToken, windowId: record.windowId };
 }
 
+function normalizeWorkspacePath(value) {
+  if (!value) return '';
+  const normalized = path.normalize(String(value));
+  const comparable = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  const root = path.parse(comparable).root;
+  let trimmed = comparable;
+  while (trimmed.length > root.length && (trimmed.endsWith('/') || trimmed.endsWith('\\'))) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed;
+}
+
 function workspaceScore(workspaceFolders, cwd) {
-  if (!cwd) return -1;
+  const normalizedCwd = normalizeWorkspacePath(cwd);
+  if (!normalizedCwd) return -1;
   let best = -1;
   for (const folder of workspaceFolders) {
-    if (cwd === folder || cwd.startsWith(folder + '/') || cwd.startsWith(folder + path.sep)) {
-      if (folder.length > best) best = folder.length;
+    const normalizedFolder = normalizeWorkspacePath(folder);
+    if (!normalizedFolder) continue;
+    if (normalizedCwd === normalizedFolder || normalizedCwd.startsWith(normalizedFolder + path.sep)) {
+      if (normalizedFolder.length > best) best = normalizedFolder.length;
     }
   }
   return best;
